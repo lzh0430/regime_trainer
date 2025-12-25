@@ -19,16 +19,30 @@ def example_1_single_symbol_training():
     print("示例 1: 训练单个交易对 (BTCUSDT)")
     print("="*80 + "\n")
     
-    # 创建训练管道
-    pipeline = TrainingPipeline(TrainingConfig)
+    print("⚠️  注意：完整训练可能需要较长时间（10-30分钟）")
+    print("   包括：数据获取、特征工程、HMM训练、LSTM训练")
+    print("   请耐心等待...\n")
     
-    # 完整重训
-    logger.info("开始完整重训...")
-    result = pipeline.full_retrain("BTCUSDT")
+    import sys
+    sys.stdout.flush()  # 确保输出立即显示
     
-    print(f"\n训练完成！")
-    print(f"准确率: {result['accuracy']:.2%}")
-    print(f"损失: {result['loss']:.4f}")
+    try:
+        # 创建训练管道
+        pipeline = TrainingPipeline(TrainingConfig)
+        
+        # 完整重训
+        logger.info("开始完整重训...")
+        result = pipeline.full_retrain("BTCUSDT")
+        
+        print(f"\n✅ 训练完成！")
+        print(f"准确率: {result['accuracy']:.2%}")
+        print(f"损失: {result['loss']:.4f}")
+    except KeyboardInterrupt:
+        print("\n\n⚠️  训练被用户中断")
+        raise
+    except Exception as e:
+        print(f"\n❌ 训练失败: {e}")
+        raise
 
 
 def example_2_multiple_symbols_training():
@@ -109,15 +123,23 @@ def example_4_regime_history():
         
         print(f"\n最近 24 小时的市场状态变化:")
         print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print(history.tail(20))
         
-        # 统计各状态出现次数
-        print(f"\n状态分布:")
-        print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        regime_counts = history['regime_name'].value_counts()
-        for regime, count in regime_counts.items():
-            percentage = count / len(history) * 100
-            print(f"{regime:20s} {count:4d} 次 ({percentage:5.1f}%)")
+        if history.empty:
+            print("⚠️  没有足够的历史数据进行分析。")
+            print("   可能的原因：")
+            print("   1. 数据量不足（需要至少 64 行数据）")
+            print("   2. 特征计算失败")
+            print("   建议：获取更多历史数据或检查数据获取是否正常")
+        else:
+            print(history.tail(20))
+            
+            # 统计各状态出现次数
+            print(f"\n状态分布:")
+            print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            regime_counts = history['regime_name'].value_counts()
+            for regime, count in regime_counts.items():
+                percentage = count / len(history) * 100
+                print(f"{regime:20s} {count:4d} 次 ({percentage:5.1f}%)")
         
     except FileNotFoundError:
         print("\n❌ 模型文件不存在，请先运行训练（示例 1 或 2）")
@@ -165,6 +187,13 @@ def example_6_incremental_training():
     print("示例 6: 增量训练（在现有模型基础上）")
     print("="*80 + "\n")
     
+    print("⚠️  注意：增量训练通常需要 2-5 分钟")
+    print("   包括：获取最新数据、特征工程、模型更新")
+    print("   请耐心等待...\n")
+    
+    import sys
+    sys.stdout.flush()  # 确保输出立即显示
+    
     try:
         pipeline = TrainingPipeline(TrainingConfig)
         
@@ -172,12 +201,19 @@ def example_6_incremental_training():
         logger.info("开始增量训练...")
         result = pipeline.incremental_train("BTCUSDT")
         
-        print(f"\n增量训练完成！")
+        print(f"\n✅ 增量训练完成！")
         print(f"使用样本数: {result['samples_used']}")
         print(f"训练时间: {result['timestamp']}")
         
-    except FileNotFoundError:
-        print("\n❌ 模型文件不存在，请先运行完整训练（示例 1）")
+    except FileNotFoundError as e:
+        print(f"\n❌ 模型文件不存在: {e}")
+        print("   请先运行完整训练（示例 1）")
+    except KeyboardInterrupt:
+        print("\n\n⚠️  训练被用户中断")
+        raise
+    except Exception as e:
+        print(f"\n❌ 增量训练失败: {e}")
+        raise
 
 
 def print_menu():
@@ -204,9 +240,33 @@ def main():
     # 确保目录存在
     TrainingConfig.ensure_dirs()
     
+    # 运行选定的示例
+    examples = {
+        1: example_1_single_symbol_training,
+        2: example_2_multiple_symbols_training,
+        3: example_3_realtime_prediction,
+        4: example_4_regime_history,
+        5: example_5_multi_symbol_tracking,
+        6: example_6_incremental_training,
+    }
+    
     # 如果有命令行参数，直接运行指定示例
     if len(sys.argv) > 1:
         example_num = int(sys.argv[1])
+        
+        if example_num == 0:
+            print("\n👋 再见！")
+            return
+        
+        if example_num in examples:
+            try:
+                examples[example_num]()
+                print("\n✅ 示例运行完成！")
+            except Exception as e:
+                logger.error(f"示例运行失败: {e}", exc_info=True)
+                print(f"\n❌ 错误: {e}")
+        else:
+            print("❌ 无效的示例编号")
     else:
         # 交互式菜单
         while True:
@@ -219,35 +279,32 @@ def main():
             except KeyboardInterrupt:
                 print("\n\n👋 再见！")
                 break
-    
-    # 运行选定的示例
-    examples = {
-        1: example_1_single_symbol_training,
-        2: example_2_multiple_symbols_training,
-        3: example_3_realtime_prediction,
-        4: example_4_regime_history,
-        5: example_5_multi_symbol_tracking,
-        6: example_6_incremental_training,
-    }
-    
-    if example_num == 0:
-        print("\n👋 再见！")
-        return
-    
-    if example_num in examples:
-        try:
-            examples[example_num]()
-            print("\n✅ 示例运行完成！")
-        except Exception as e:
-            logger.error(f"示例运行失败: {e}", exc_info=True)
-            print(f"\n❌ 错误: {e}")
-    else:
-        print("❌ 无效的示例编号")
-    
-    # 如果是交互式模式，继续显示菜单
-    if len(sys.argv) == 1:
-        input("\n按回车键继续...")
-        main()
+            
+            if example_num == 0:
+                print("\n👋 再见！")
+                break
+            
+            if example_num in examples:
+                try:
+                    examples[example_num]()
+                    print("\n✅ 示例运行完成！")
+                except Exception as e:
+                    logger.error(f"示例运行失败: {e}", exc_info=True)
+                    print(f"\n❌ 错误: {e}")
+                
+                # 继续显示菜单
+                try:
+                    input("\n按回车键继续...")
+                except KeyboardInterrupt:
+                    print("\n\n👋 再见！")
+                    break
+            else:
+                print("❌ 无效的示例编号")
+                try:
+                    input("\n按回车键继续...")
+                except KeyboardInterrupt:
+                    print("\n\n👋 再见！")
+                    break
 
 
 if __name__ == "__main__":

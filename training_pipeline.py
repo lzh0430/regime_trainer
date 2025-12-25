@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 
 from config import TrainingConfig
-from data_fetcher import BinanceDataFetcher, save_data
+from data_fetcher import BinanceDataFetcher
 from feature_engineering import FeatureEngineer
 from hmm_trainer import HMMRegimeLabeler, create_labeled_dataset
 from lstm_trainer import LSTMRegimeClassifier
@@ -33,7 +33,7 @@ class TrainingPipeline:
             api_key=config.BINANCE_API_KEY,
             api_secret=config.BINANCE_API_SECRET
         )
-        self.feature_engineer = FeatureEngineer()
+        self.feature_engineer = FeatureEngineer(cache_manager=self.data_fetcher.cache_manager)
     
     def full_retrain(self, symbol: str) -> Dict:
         """
@@ -56,13 +56,18 @@ class TrainingPipeline:
             timeframes=self.config.TIMEFRAMES,
             days=self.config.FULL_RETRAIN_DAYS
         )
-        save_data(data, symbol, self.config)
+        # 注意：数据已自动保存到 SQLite 缓存中，无需额外保存
+        
+        # 输出 API 统计信息
+        stats = self.data_fetcher.get_api_stats()
+        logger.info(f"API 请求统计: {stats}")
         
         # 2. 特征工程
         logger.info("步骤 2/5: 计算技术指标...")
         features = self.feature_engineer.combine_timeframe_features(
             data,
-            primary_timeframe=self.config.PRIMARY_TIMEFRAME
+            primary_timeframe=self.config.PRIMARY_TIMEFRAME,
+            symbol=symbol
         )
         
         # 可选：特征选择
@@ -154,11 +159,16 @@ class TrainingPipeline:
             days=self.config.INCREMENTAL_TRAIN_DAYS
         )
         
+        # 输出 API 统计信息
+        stats = self.data_fetcher.get_api_stats()
+        logger.info(f"API 请求统计: {stats}")
+        
         # 2. 特征工程
         logger.info("步骤 2/4: 计算技术指标...")
         features = self.feature_engineer.combine_timeframe_features(
             data,
-            primary_timeframe=self.config.PRIMARY_TIMEFRAME
+            primary_timeframe=self.config.PRIMARY_TIMEFRAME,
+            symbol=symbol
         )
         
         # 3. 加载 HMM 模型并标注
@@ -170,6 +180,43 @@ class TrainingPipeline:
             return self.full_retrain(symbol)
         
         hmm_labeler = HMMRegimeLabeler.load(hmm_path)
+        
+        # 应用特征选择（与完整训练保持一致）
+        features_before_selection = features.copy()
+        features = self.feature_engineer.select_key_features(features)
+        
+        # 如果模型保存了特征名称，确保特征一致
+        if hmm_labeler.feature_names_ is not None:
+            # 检查特征是否匹配
+            missing_features = set(hmm_labeler.feature_names_) - set(features.columns)
+            extra_features = set(features.columns) - set(hmm_labeler.feature_names_)
+            
+            if missing_features or extra_features:
+                logger.warning(
+                    f"特征选择结果不一致！\n"
+                    f"  训练时特征数: {len(hmm_labeler.feature_names_)}\n"
+                    f"  当前特征数: {len(features.columns)}\n"
+                    f"  缺少特征: {len(missing_features)} 个\n"
+                    f"  多余特征: {len(extra_features)} 个"
+                )
+                # predict 方法会自动处理特征对齐
+        else:
+            # 旧版本模型：检查特征数量
+            expected_features = (
+                hmm_labeler.scaler.n_features_in_ 
+                if hasattr(hmm_labeler.scaler, 'n_features_in_') 
+                else None
+            )
+            if expected_features and len(features.columns) != expected_features:
+                logger.error(
+                    f"特征数量不匹配！训练时: {expected_features} 个特征, "
+                    f"当前: {len(features.columns)} 个特征\n"
+                    f"这是旧版本模型，建议重新训练模型（运行示例 1）以保存特征名称。"
+                )
+                raise ValueError(
+                    f"特征数量不匹配。请重新训练模型（运行示例 1）以确保特征一致性。"
+                )
+        
         states = hmm_labeler.predict(features)
         
         # 4. 加载 LSTM 模型并增量训练
@@ -183,8 +230,57 @@ class TrainingPipeline:
         
         lstm_classifier = LSTMRegimeClassifier.load(model_path, scaler_path)
         
+        # 对齐特征（确保与训练时一致）
+        # 优先使用保存的特征名称，如果没有则使用 scaler 的 feature_names_in_
+        feature_names = lstm_classifier.feature_names_
+        if feature_names is None and hasattr(lstm_classifier.scaler, 'feature_names_in_'):
+            feature_names = list(lstm_classifier.scaler.feature_names_in_)
+            logger.info(f"使用 scaler 的特征名称: {len(feature_names)} 个特征")
+        
+        if feature_names is not None:
+            # 确保特征顺序和数量与训练时一致
+            missing_features = set(feature_names) - set(features.columns)
+            extra_features = set(features.columns) - set(feature_names)
+            
+            if missing_features or extra_features:
+                logger.warning(
+                    f"特征不一致！\n"
+                    f"  训练时特征数: {len(feature_names)}\n"
+                    f"  当前特征数: {len(features.columns)}\n"
+                    f"  缺少特征: {len(missing_features)} 个\n"
+                    f"  多余特征: {len(extra_features)} 个"
+                )
+                if missing_features:
+                    logger.warning(f"  缺少的特征: {missing_features}")
+                if extra_features:
+                    logger.warning(f"  多余的特征: {extra_features}")
+                
+                # 对齐特征：添加缺失的特征（填充0），移除多余的特征
+                features_aligned = features.reindex(columns=feature_names, fill_value=0)
+                logger.info(f"特征已对齐: {len(features_aligned.columns)} 个特征")
+            else:
+                # 特征名称一致，但需要确保顺序一致
+                features_aligned = features[feature_names]
+        else:
+            # 旧版本模型：只检查特征数量
+            expected_features = (
+                lstm_classifier.scaler.n_features_in_ 
+                if hasattr(lstm_classifier.scaler, 'n_features_in_') 
+                else None
+            )
+            if expected_features and len(features.columns) != expected_features:
+                logger.error(
+                    f"特征数量不匹配！训练时: {expected_features} 个特征, "
+                    f"当前: {len(features.columns)} 个特征\n"
+                    f"这是旧版本模型，建议重新训练模型（运行示例 1）以保存特征名称。"
+                )
+                raise ValueError(
+                    f"特征数量不匹配。请重新训练模型（运行示例 1）以确保特征一致性。"
+                )
+            features_aligned = features
+        
         # 准备增量训练数据
-        features_scaled = lstm_classifier.scaler.transform(features)
+        features_scaled = lstm_classifier.scaler.transform(features_aligned)
         
         X, y = [], []
         for i in range(len(features_scaled) - lstm_classifier.sequence_length):

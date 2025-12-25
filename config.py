@@ -67,6 +67,11 @@ class TrainingConfig:
     BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
     BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
     
+    # ============ 数据缓存配置 ============
+    CACHE_DB_PATH = os.path.join(BASE_DIR, "data", "cache.db")
+    CACHE_ENABLED = True
+    CACHE_COMPRESSION = True  # 是否压缩存储
+    
     @classmethod
     def get_model_path(cls, symbol: str, model_type: str = "lstm") -> str:
         """获取模型保存路径"""

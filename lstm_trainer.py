@@ -41,6 +41,7 @@ class LSTMRegimeClassifier:
         self.model = None
         self.scaler = None
         self.history = None
+        self.feature_names_ = None  # 保存训练时使用的特征名称
     
     def build_model(self, n_features: int):
         """
@@ -107,6 +108,9 @@ class LSTMRegimeClassifier:
         # 标准化特征
         self.scaler = StandardScaler()
         features_scaled = self.scaler.fit_transform(features)
+        
+        # 保存特征名称（用于增量训练时的特征对齐）
+        self.feature_names_ = list(features.columns)
         
         # 创建序列数据
         X, y = [], []
@@ -221,8 +225,13 @@ class LSTMRegimeClassifier:
         
         logger.info("开始增量训练...")
         
-        # 使用较小的学习率
-        self.model.optimizer.learning_rate = 1e-5
+        # 重新编译模型以确保优化器正确初始化（解决 Keras 优化器变量问题）
+        # 使用较小的学习率进行增量训练
+        self.model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=1e-5),
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy']
+        )
         
         self.model.fit(
             X_new, y_new,
@@ -308,6 +317,13 @@ class LSTMRegimeClassifier:
         with open(scaler_path, 'wb') as f:
             pickle.dump(self.scaler, f)
         logger.info(f"Scaler 已保存到 {scaler_path}")
+        
+        # 保存特征名称（用于增量训练时的特征对齐）
+        if self.feature_names_ is not None:
+            feature_names_path = scaler_path.replace('.pkl', '_feature_names.pkl')
+            with open(feature_names_path, 'wb') as f:
+                pickle.dump(self.feature_names_, f)
+            logger.info(f"特征名称已保存到 {feature_names_path}")
     
     @classmethod
     def load(cls, model_path: str, scaler_path: str) -> 'LSTMRegimeClassifier':
@@ -319,13 +335,25 @@ class LSTMRegimeClassifier:
         with open(scaler_path, 'rb') as f:
             scaler = pickle.load(f)
         
+        # 加载特征名称（如果存在）
+        feature_names = None
+        feature_names_path = scaler_path.replace('.pkl', '_feature_names.pkl')
+        if os.path.exists(feature_names_path):
+            with open(feature_names_path, 'rb') as f:
+                feature_names = pickle.load(f)
+        
         # 创建实例
         classifier = cls()
         classifier.model = model
         classifier.scaler = scaler
+        classifier.feature_names_ = feature_names
         
         logger.info(f"LSTM 模型已从 {model_path} 加载")
         logger.info(f"Scaler 已从 {scaler_path} 加载")
+        if feature_names:
+            logger.info(f"训练时使用的特征数: {len(feature_names)}")
+        else:
+            logger.warning("未找到特征名称文件，这是旧版本模型。建议重新训练模型以确保特征一致性。")
         
         return classifier
     
@@ -349,6 +377,30 @@ class LSTMRegimeClassifier:
         
         # 只取最后 sequence_length 行
         features = features.iloc[-self.sequence_length:]
+        
+        # 对齐特征（如果保存了特征名称）
+        # 优先使用保存的特征名称，如果没有则使用 scaler 的 feature_names_in_
+        feature_names = self.feature_names_
+        if feature_names is None and hasattr(self.scaler, 'feature_names_in_'):
+            feature_names = list(self.scaler.feature_names_in_)
+        
+        if feature_names is not None:
+            missing_features = set(feature_names) - set(features.columns)
+            extra_features = set(features.columns) - set(feature_names)
+            
+            if missing_features or extra_features:
+                # 对齐特征：添加缺失的特征（填充0），移除多余的特征
+                features = features.reindex(columns=feature_names, fill_value=0)
+            else:
+                # 特征名称一致，但需要确保顺序一致
+                features = features[feature_names]
+        elif hasattr(self.scaler, 'n_features_in_'):
+            # 旧版本模型：只检查特征数量
+            if len(features.columns) != self.scaler.n_features_in_:
+                raise ValueError(
+                    f"特征数量不匹配！训练时: {self.scaler.n_features_in_} 个特征, "
+                    f"当前: {len(features.columns)} 个特征"
+                )
         
         # 标准化
         features_scaled = self.scaler.transform(features)

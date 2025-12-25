@@ -28,6 +28,7 @@ class HMMRegimeLabeler:
         self.hmm_model = None
         self.pca = None
         self.scaler = None
+        self.feature_names_ = None  # 保存训练时使用的特征名称
     
     def fit(self, features: pd.DataFrame, n_iter: int = 100) -> np.ndarray:
         """
@@ -41,6 +42,9 @@ class HMMRegimeLabeler:
             状态标签数组
         """
         logger.info(f"开始 HMM 训练，特征维度: {features.shape}")
+        
+        # 保存特征名称（用于后续预测时确保特征一致）
+        self.feature_names_ = list(features.columns)
         
         # 1. 标准化
         self.scaler = StandardScaler()
@@ -85,6 +89,40 @@ class HMMRegimeLabeler:
         if self.hmm_model is None:
             raise ValueError("模型尚未训练，请先调用 fit()")
         
+        # 确保特征列与训练时一致
+        if self.feature_names_ is not None:
+            # 检查是否有缺失的特征
+            missing_features = set(self.feature_names_) - set(features.columns)
+            if missing_features:
+                # 尝试添加缺失的特征（填充为0）
+                logger.warning(
+                    f"缺少 {len(missing_features)} 个训练时使用的特征，将填充为0: "
+                    f"{list(missing_features)[:5]}..."
+                )
+                for feat in missing_features:
+                    features[feat] = 0.0
+            
+            # 检查是否有额外的特征
+            extra_features = set(features.columns) - set(self.feature_names_)
+            if extra_features:
+                logger.debug(f"移除 {len(extra_features)} 个训练时未使用的特征")
+            
+            # 只选择训练时使用的特征，并按照训练时的顺序排列
+            features = features[self.feature_names_]
+        else:
+            # 向后兼容：如果没有保存特征名称，检查特征数量
+            expected_features = self.scaler.n_features_in_ if hasattr(self.scaler, 'n_features_in_') else None
+            if expected_features and len(features.columns) != expected_features:
+                raise ValueError(
+                    f"特征数量不匹配！训练时: {expected_features} 个特征, "
+                    f"当前: {len(features.columns)} 个特征\n"
+                    f"这是旧版本模型，请重新训练模型以保存特征名称。"
+                )
+            logger.warning(
+                "模型中没有保存特征名称（旧版本模型）。"
+                "建议重新训练模型以确保特征一致性。"
+            )
+        
         # 应用相同的预处理
         features_scaled = self.scaler.transform(features)
         features_pca = self.pca.transform(features_scaled)
@@ -120,7 +158,8 @@ class HMMRegimeLabeler:
             'pca': self.pca,
             'scaler': self.scaler,
             'n_states': self.n_states,
-            'n_components': self.n_components
+            'n_components': self.n_components,
+            'feature_names': self.feature_names_  # 保存特征名称
         }
         
         with open(filepath, 'wb') as f:
@@ -141,8 +180,11 @@ class HMMRegimeLabeler:
         labeler.hmm_model = model_data['hmm_model']
         labeler.pca = model_data['pca']
         labeler.scaler = model_data['scaler']
+        labeler.feature_names_ = model_data.get('feature_names')  # 加载特征名称（向后兼容）
         
         logger.info(f"HMM 模型已从 {filepath} 加载")
+        if labeler.feature_names_:
+            logger.info(f"训练时使用的特征数: {len(labeler.feature_names_)}")
         return labeler
     
     def analyze_regimes(self, features: pd.DataFrame, states: np.ndarray) -> pd.DataFrame:
