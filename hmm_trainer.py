@@ -1,5 +1,9 @@
 """
 HMM 训练模块 - 用于无监督市场状态标注
+
+修复数据泄漏问题：
+- fit() 只在训练集上拟合 scaler, PCA, HMM
+- predict() 使用训练好的模型对新数据进行预测（不泄漏未来信息）
 """
 import numpy as np
 import pandas as pd
@@ -8,7 +12,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import pickle
 import logging
-from typing import Tuple
+from typing import Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -34,30 +38,34 @@ class HMMRegimeLabeler:
         """
         训练 HMM 并标注市场状态
         
+        注意：此方法只应在训练集上调用，避免数据泄漏。
+        对于验证集和测试集，应使用 predict() 方法。
+        
         Args:
-            features: 特征 DataFrame
+            features: 特征 DataFrame（应只包含训练集数据）
             n_iter: HMM 训练迭代次数
             
         Returns:
-            状态标签数组
+            状态标签数组（训练集的标签）
         """
         logger.info(f"开始 HMM 训练，特征维度: {features.shape}")
+        logger.info("注意：HMM 只在训练集上拟合，避免数据泄漏")
         
         # 保存特征名称（用于后续预测时确保特征一致）
         self.feature_names_ = list(features.columns)
         
-        # 1. 标准化
+        # 1. 标准化（只在训练集上 fit）
         self.scaler = StandardScaler()
         features_scaled = self.scaler.fit_transform(features)
         
-        # 2. PCA 降维
+        # 2. PCA 降维（只在训练集上 fit）
         self.pca = PCA(n_components=self.n_components)
         features_pca = self.pca.fit_transform(features_scaled)
         
         logger.info(f"PCA 解释方差比: {self.pca.explained_variance_ratio_}")
         logger.info(f"PCA 累计解释方差: {np.cumsum(self.pca.explained_variance_ratio_)}")
         
-        # 3. 训练 HMM
+        # 3. 训练 HMM（只在训练集上 fit）
         self.hmm_model = hmm.GaussianHMM(
             n_components=self.n_states,
             covariance_type="full",
@@ -68,13 +76,55 @@ class HMMRegimeLabeler:
         
         self.hmm_model.fit(features_pca)
         
-        # 4. 预测状态
+        # 4. 预测训练集的状态
         states = self.hmm_model.predict(features_pca)
         
         logger.info(f"HMM 训练完成，BIC: {self.hmm_model.bic(features_pca):.2f}")
-        logger.info(f"状态分布: {np.bincount(states)}")
+        logger.info(f"训练集状态分布: {np.bincount(states)}")
         
         return states
+    
+    def fit_predict_split(
+        self, 
+        train_features: pd.DataFrame, 
+        val_features: Optional[pd.DataFrame] = None,
+        test_features: Optional[pd.DataFrame] = None,
+        n_iter: int = 100
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        在训练集上拟合 HMM，并分别预测训练/验证/测试集的状态标签
+        
+        这是推荐的方法，可以避免数据泄漏：
+        - Scaler 只在训练集上 fit
+        - PCA 只在训练集上 fit  
+        - HMM 只在训练集上 fit
+        - 验证集和测试集只做 transform 和 predict
+        
+        Args:
+            train_features: 训练集特征
+            val_features: 验证集特征（可选）
+            test_features: 测试集特征（可选）
+            n_iter: HMM 训练迭代次数
+            
+        Returns:
+            (train_states, val_states, test_states) - 各数据集的状态标签
+        """
+        # 在训练集上拟合
+        train_states = self.fit(train_features, n_iter=n_iter)
+        
+        # 预测验证集状态（使用训练集拟合的 scaler/PCA/HMM）
+        val_states = None
+        if val_features is not None and len(val_features) > 0:
+            val_states = self.predict(val_features)
+            logger.info(f"验证集状态分布: {np.bincount(val_states, minlength=self.n_states)}")
+        
+        # 预测测试集状态
+        test_states = None
+        if test_features is not None and len(test_features) > 0:
+            test_states = self.predict(test_features)
+            logger.info(f"测试集状态分布: {np.bincount(test_states, minlength=self.n_states)}")
+        
+        return train_states, val_states, test_states
     
     def predict(self, features: pd.DataFrame) -> np.ndarray:
         """
@@ -223,30 +273,3 @@ class HMMRegimeLabeler:
             regime_stats.append(stats)
         
         return pd.DataFrame(regime_stats)
-
-
-def create_labeled_dataset(
-    features: pd.DataFrame,
-    states: np.ndarray,
-    sequence_length: int = 64
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    创建带标签的序列数据集（用于 LSTM 训练）
-    
-    Args:
-        features: 特征 DataFrame
-        states: HMM 状态标签
-        sequence_length: 序列长度
-        
-    Returns:
-        (X, y) - X 是序列特征，y 是对应的状态标签
-    """
-    X, y = [], []
-    
-    features_array = features.values
-    
-    for i in range(len(features_array) - sequence_length):
-        X.append(features_array[i:i+sequence_length])
-        y.append(states[i+sequence_length])
-    
-    return np.array(X), np.array(y)

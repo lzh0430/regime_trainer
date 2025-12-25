@@ -333,6 +333,15 @@ class DataCacheManager:
         # 返回最新数据的时间戳
         return cached_df.index.max()
     
+    def _get_timeframe_minutes(self, timeframe: str) -> int:
+        """将时间框架转换为分钟数"""
+        timeframe_map = {
+            '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30,
+            '1h': 60, '2h': 120, '4h': 240, '6h': 360, '8h': 480, '12h': 720,
+            '1d': 1440, '3d': 4320, '1w': 10080, '1M': 43200
+        }
+        return timeframe_map.get(timeframe, 15)
+    
     def check_data_gaps(
         self, 
         symbol: str, 
@@ -341,7 +350,9 @@ class DataCacheManager:
         end_date: datetime
     ) -> List[Tuple[datetime, datetime]]:
         """
-        检查数据缺失的时间段
+        检查数据缺失的时间段（精确到时间戳级别）
+        
+        修复：不再只检查日期级别的缺失，而是精确检查时间戳级别的缺失。
         
         Args:
             symbol: 交易对
@@ -354,6 +365,8 @@ class DataCacheManager:
         """
         start_date_only = start_date.date()
         end_date_only = end_date.date()
+        
+        missing_ranges = []
         
         # 获取缓存中已有的日期
         with sqlite3.connect(self.db_path) as conn:
@@ -375,24 +388,20 @@ class DataCacheManager:
             expected_dates.add(current_date)
             current_date += timedelta(days=1)
         
-        # 找出缺失的日期
+        # 找出完全缺失的日期（整天都没有数据）
         missing_dates = sorted(expected_dates - cached_dates)
         
-        if not missing_dates:
-            return []
-        
         # 将连续的缺失日期合并为时间段
-        missing_ranges = []
         if missing_dates:
             range_start = datetime.combine(missing_dates[0], datetime.min.time())
             range_end = datetime.combine(missing_dates[0], datetime.max.time())
             
             for i in range(1, len(missing_dates)):
-                current_date = datetime.combine(missing_dates[i], datetime.min.time())
-                prev_date = datetime.combine(missing_dates[i-1], datetime.min.time())
+                current_dt = datetime.combine(missing_dates[i], datetime.min.time())
+                prev_dt = datetime.combine(missing_dates[i-1], datetime.min.time())
                 
                 # 如果日期连续，扩展范围
-                if (current_date - prev_date).days == 1:
+                if (current_dt - prev_dt).days == 1:
                     range_end = datetime.combine(missing_dates[i], datetime.max.time())
                 else:
                     # 保存当前范围，开始新范围
@@ -403,54 +412,52 @@ class DataCacheManager:
             # 添加最后一个范围
             missing_ranges.append((range_start, range_end))
         
+        # ===== 关键修复：检查时间戳级别的缺口 =====
+        # 获取缓存数据的实际时间范围
+        cached_df = self.get_cached_data(symbol, timeframe, start_date_only, end_date_only)
+        
+        if cached_df.empty:
+            # 如果没有任何缓存数据，整个时间范围都是缺失的
+            if not missing_ranges:
+                missing_ranges.append((start_date, end_date))
+            return missing_ranges
+        
+        actual_start = cached_df.index.min()
+        actual_end = cached_df.index.max()
+        
+        interval_minutes = self._get_timeframe_minutes(timeframe)
+        tolerance = timedelta(minutes=interval_minutes * 2)  # 允许2个时间间隔的容差
+        
+        # 检查头部缺口：请求的 start_date 到缓存数据的实际开始时间
+        if actual_start > start_date + tolerance:
+            head_gap = (start_date, actual_start - timedelta(minutes=1))
+            # 检查是否与已有的缺失范围重叠，如果不重叠则添加
+            if not any(r[0] <= head_gap[0] <= r[1] or r[0] <= head_gap[1] <= r[1] for r in missing_ranges):
+                missing_ranges.append(head_gap)
+                logger.debug(f"发现头部缺口: {head_gap[0]} 至 {head_gap[1]}")
+        
+        # 检查尾部缺口：缓存数据的实际结束时间到请求的 end_date
+        if actual_end + tolerance < end_date:
+            tail_gap_start = actual_end + timedelta(minutes=interval_minutes)
+            tail_gap = (tail_gap_start, end_date)
+            # 检查是否与已有的缺失范围重叠
+            if not any(r[0] <= tail_gap[0] <= r[1] or r[0] <= tail_gap[1] <= r[1] for r in missing_ranges):
+                missing_ranges.append(tail_gap)
+                logger.debug(f"发现尾部缺口: {tail_gap[0]} 至 {tail_gap[1]}")
+        
+        # 按开始时间排序
+        missing_ranges.sort(key=lambda x: x[0])
+        
+        # 输出调试信息
+        if missing_ranges:
+            logger.info(
+                f"数据缺口检查 ({symbol} {timeframe}): "
+                f"请求范围 {start_date.strftime('%Y-%m-%d %H:%M')} 至 {end_date.strftime('%Y-%m-%d %H:%M')}, "
+                f"缓存范围 {actual_start.strftime('%Y-%m-%d %H:%M')} 至 {actual_end.strftime('%Y-%m-%d %H:%M')}, "
+                f"发现 {len(missing_ranges)} 个缺口"
+            )
+        
         return missing_ranges
-    
-    def get_cache_stats(self, symbol: str, timeframe: str) -> Dict:
-        """
-        获取缓存统计信息
-        
-        Args:
-            symbol: 交易对
-            timeframe: 时间框架
-            
-        Returns:
-            统计信息字典
-        """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # 获取数据范围
-            cursor.execute("""
-                SELECT MIN(date), MAX(date), COUNT(DISTINCT date)
-                FROM klines_cache
-                WHERE symbol = ? AND timeframe = ?
-            """, (symbol, timeframe))
-            
-            result = cursor.fetchone()
-            
-            # 获取总数据量
-            cursor.execute("""
-                SELECT SUM(LENGTH(data))
-                FROM klines_cache
-                WHERE symbol = ? AND timeframe = ?
-            """, (symbol, timeframe))
-            
-            total_size = cursor.fetchone()[0] or 0
-        
-        if not result or not result[0]:
-            return {
-                'min_date': None,
-                'max_date': None,
-                'days_count': 0,
-                'total_size_mb': 0
-            }
-        
-        return {
-            'min_date': datetime.fromisoformat(result[0]).date() if result[0] else None,
-            'max_date': datetime.fromisoformat(result[1]).date() if result[1] else None,
-            'days_count': result[2] or 0,
-            'total_size_mb': round(total_size / (1024 * 1024), 2)
-        }
     
     def clear_cache(self, symbol: str = None, timeframe: str = None):
         """
@@ -672,77 +679,6 @@ class DataCacheManager:
         if result and result[0]:
             return datetime.fromisoformat(result[0]).date()
         return None
-    
-    def check_features_gaps(
-        self,
-        symbol: str,
-        timeframe: str,
-        start_date: datetime,
-        end_date: datetime
-    ) -> List[Tuple[datetime, datetime]]:
-        """
-        检查特征缺失的时间段
-        
-        Args:
-            symbol: 交易对
-            timeframe: 时间框架
-            start_date: 开始时间
-            end_date: 结束时间
-            
-        Returns:
-            缺失时间段列表
-        """
-        start_date_only = start_date.date()
-        end_date_only = end_date.date()
-        
-        # 获取缓存中已有的日期
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT DISTINCT date
-                FROM features_cache
-                WHERE symbol = ? AND timeframe = ?
-                AND date >= ? AND date <= ?
-                ORDER BY date
-            """, (symbol, timeframe, start_date_only.isoformat(), end_date_only.isoformat()))
-            
-            cached_dates = {datetime.fromisoformat(row[0]).date() for row in cursor.fetchall()}
-        
-        # 生成期望的所有日期
-        expected_dates = set()
-        current_date = start_date_only
-        while current_date <= end_date_only:
-            expected_dates.add(current_date)
-            current_date += timedelta(days=1)
-        
-        # 找出缺失的日期
-        missing_dates = sorted(expected_dates - cached_dates)
-        
-        if not missing_dates:
-            return []
-        
-        # 将连续的缺失日期合并为时间段
-        missing_ranges = []
-        if missing_dates:
-            current_range_start = missing_dates[0]
-            current_range_end = missing_dates[0]
-            
-            for i in range(1, len(missing_dates)):
-                if missing_dates[i] == current_range_end + timedelta(days=1):
-                    current_range_end = missing_dates[i]
-                else:
-                    missing_ranges.append((
-                        datetime.combine(current_range_start, datetime.min.time()),
-                        datetime.combine(current_range_end, datetime.max.time())
-                    ))
-                    current_range_start = missing_dates[i]
-                    current_range_end = missing_dates[i]
-            
-            missing_ranges.append((
-                datetime.combine(current_range_start, datetime.min.time()),
-                datetime.combine(current_range_end, datetime.max.time())
-            ))
-        return missing_ranges
     
     def clear_features_cache(self, symbol: str = None, timeframe: str = None):
         """

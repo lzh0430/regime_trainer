@@ -28,7 +28,6 @@ class BinanceDataFetcher:
     
     # Binance API 速率限制配置
     REQUESTS_PER_MINUTE = 1200  # 每分钟最大权重
-    KLINES_WEIGHT = 1  # 每次 klines 请求的权重
     SAFE_REQUESTS_PER_BATCH = 3  # 每批安全请求数
     DELAY_BETWEEN_BATCHES = 1.0  # 批次间延迟（秒）
     MAX_RETRIES = 3  # 最大重试次数
@@ -337,41 +336,6 @@ class BinanceDataFetcher:
             )
         }
     
-    def reset_stats(self):
-        """重置统计计数器"""
-        self.api_request_count = 0
-        self.cache_hit_count = 0
-        self.cache_miss_count = 0
-        self.rate_limit_429_count = 0
-        self.total_delay_time = 0.0
-        logger.info("统计计数器已重置")
-    
-    def get_multi_timeframe_data(
-        self, 
-        symbol: str, 
-        timeframes: List[str], 
-        start_date: datetime,
-        end_date: datetime = None
-    ) -> Dict[str, pd.DataFrame]:
-        """
-        获取多时间框架数据
-        
-        Args:
-            symbol: 交易对
-            timeframes: 时间框架列表，如 ['5m', '15m', '1h']
-            start_date: 开始日期
-            end_date: 结束日期
-            
-        Returns:
-            时间框架到 DataFrame 的字典
-        """
-        data = {}
-        for tf in timeframes:
-            df = self.get_klines(symbol, tf, start_date, end_date)
-            data[tf] = df
-        
-        return data
-    
     def fetch_latest_data(
         self, 
         symbol: str, 
@@ -544,27 +508,42 @@ class BinanceDataFetcher:
                     symbol, tf, start_date, end_date
                 )
                 
-                # 计算缓存覆盖率
+                # 计算缓存覆盖率和精确时间范围
                 total_days = (end_date - start_date).days + 1
                 cached_days = len(cached_df.groupby(cached_df.index.date)) if not cached_df.empty else 0
                 cache_coverage = (cached_days / total_days * 100) if total_days > 0 else 0
                 
-                logger.info(
-                    f"缓存检查: {symbol} {tf} - "
-                    f"缓存覆盖 {cached_days}/{total_days} 天 ({cache_coverage:.1f}%)"
-                )
+                # 显示缓存数据的精确时间范围
+                if not cached_df.empty:
+                    cache_start = cached_df.index.min()
+                    cache_end = cached_df.index.max()
+                    logger.info(
+                        f"缓存检查: {symbol} {tf} - "
+                        f"缓存覆盖 {cached_days}/{total_days} 天 ({cache_coverage:.1f}%), "
+                        f"实际范围: {cache_start.strftime('%Y-%m-%d %H:%M')} 至 {cache_end.strftime('%Y-%m-%d %H:%M')}"
+                    )
+                else:
+                    logger.info(
+                        f"缓存检查: {symbol} {tf} - "
+                        f"缓存覆盖 {cached_days}/{total_days} 天 ({cache_coverage:.1f}%)"
+                    )
                 
                 if missing_ranges:
+                    # 计算缺失的总时间
+                    total_missing_hours = sum(
+                        (r[1] - r[0]).total_seconds() / 3600 for r in missing_ranges
+                    )
                     logger.info(
                         f"缺失时间段: {len(missing_ranges)} 个时间段，"
-                        f"共约 {sum((r[1] - r[0]).days + 1 for r in missing_ranges)} 天"
+                        f"共约 {total_missing_hours:.1f} 小时"
                     )
                     
                     # 请求缺失的数据
                     missing_dfs = []
                     for miss_start, miss_end in missing_ranges:
+                        # 显示精确的时间而不仅仅是日期
                         logger.info(
-                            f"请求缺失数据: {miss_start.date()} 至 {miss_end.date()}"
+                            f"请求缺失数据: {miss_start.strftime('%Y-%m-%d %H:%M')} 至 {miss_end.strftime('%Y-%m-%d %H:%M')}"
                         )
                         missing_df = self.get_klines(symbol, tf, miss_start, miss_end)
                         if not missing_df.empty:
@@ -607,85 +586,3 @@ class BinanceDataFetcher:
             data[tf] = df
         
         return data
-
-
-def save_data(data: Dict[str, pd.DataFrame], symbol: str, config: TrainingConfig):
-    """
-    保存数据到本地（已弃用）
-    
-    注意：此函数已弃用。数据现在自动保存到 SQLite 缓存中。
-    保留此函数仅用于向后兼容。
-    
-    Args:
-        data: 数据字典
-        symbol: 交易对
-        config: 配置对象
-        
-    Returns:
-        保存路径
-    """
-    import warnings
-    warnings.warn(
-        "save_data() 已弃用。数据现在自动保存到 SQLite 缓存中。"
-        "请使用 DataCacheManager 来管理数据。",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    
-    import os
-    import pickle
-    
-    save_dir = os.path.join(config.DATA_DIR, symbol)
-    os.makedirs(save_dir, exist_ok=True)
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = os.path.join(save_dir, f"data_{timestamp}.pkl")
-    
-    with open(save_path, 'wb') as f:
-        pickle.dump(data, f)
-    
-    logger.warning(f"数据已保存到 {save_path} (已弃用，建议使用 SQLite 缓存)")
-    return save_path
-
-
-def load_latest_data(symbol: str, config: TrainingConfig) -> Dict[str, pd.DataFrame]:
-    """
-    加载最新保存的数据（已弃用）
-    
-    注意：此函数已弃用。请使用 DataCacheManager.get_cached_data() 来获取数据。
-    保留此函数仅用于向后兼容。
-    
-    Args:
-        symbol: 交易对
-        config: 配置对象
-        
-    Returns:
-        数据字典
-    """
-    import warnings
-    warnings.warn(
-        "load_latest_data() 已弃用。请使用 DataCacheManager.get_cached_data() 来获取数据。",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    
-    import os
-    import pickle
-    
-    save_dir = os.path.join(config.DATA_DIR, symbol)
-    if not os.path.exists(save_dir):
-        raise FileNotFoundError(f"数据目录不存在: {save_dir}")
-    
-    # 获取最新的数据文件
-    files = [f for f in os.listdir(save_dir) if f.startswith("data_") and f.endswith(".pkl")]
-    if not files:
-        raise FileNotFoundError(f"未找到数据文件: {save_dir}")
-    
-    latest_file = sorted(files)[-1]
-    load_path = os.path.join(save_dir, latest_file)
-    
-    with open(load_path, 'rb') as f:
-        data = pickle.load(f)
-    
-    logger.warning(f"已加载数据: {load_path} (已弃用，建议使用 SQLite 缓存)")
-    return data

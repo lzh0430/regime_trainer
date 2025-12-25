@@ -410,23 +410,6 @@ class FeatureEngineer:
         
         return combined
     
-    def prepare_features_for_hmm(self, features: pd.DataFrame) -> np.ndarray:
-        """
-        准备用于 HMM 的特征（标准化）
-        
-        Args:
-            features: 特征 DataFrame
-            
-        Returns:
-            标准化后的特征数组
-        """
-        from sklearn.preprocessing import StandardScaler
-        
-        scaler = StandardScaler()
-        features_scaled = scaler.fit_transform(features)
-        
-        return features_scaled
-    
     def select_key_features(self, features: pd.DataFrame) -> pd.DataFrame:
         """
         选择关键特征（可选：用于降维）

@@ -1,5 +1,11 @@
 """
 主训练管道 - 协调数据获取、特征工程、HMM 和 LSTM 训练
+
+修复数据泄漏问题：
+1. 先按时间划分数据为 train/val/test
+2. HMM 只在训练集上拟合（scaler, PCA, HMM 参数）
+3. 用训练好的 HMM 对验证集和测试集进行预测（无数据泄漏）
+4. LSTM 使用独立的验证集和测试集
 """
 import logging
 import os
@@ -11,7 +17,7 @@ import numpy as np
 from config import TrainingConfig
 from data_fetcher import BinanceDataFetcher
 from feature_engineering import FeatureEngineer
-from hmm_trainer import HMMRegimeLabeler, create_labeled_dataset
+from hmm_trainer import HMMRegimeLabeler
 from lstm_trainer import LSTMRegimeClassifier
 
 logging.basicConfig(
@@ -35,9 +41,56 @@ class TrainingPipeline:
         )
         self.feature_engineer = FeatureEngineer(cache_manager=self.data_fetcher.cache_manager)
     
+    def _split_data_by_time(
+        self, 
+        features: pd.DataFrame, 
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.15,
+        test_ratio: float = 0.15
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """
+        按时间顺序划分数据为 train/val/test
+        
+        Args:
+            features: 完整特征 DataFrame
+            train_ratio: 训练集比例
+            val_ratio: 验证集比例
+            test_ratio: 测试集比例
+            
+        Returns:
+            (train_features, val_features, test_features)
+        """
+        assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, \
+            "train_ratio + val_ratio + test_ratio 必须等于 1.0"
+        
+        n = len(features)
+        train_end = int(n * train_ratio)
+        val_end = int(n * (train_ratio + val_ratio))
+        
+        train_features = features.iloc[:train_end]
+        val_features = features.iloc[train_end:val_end]
+        test_features = features.iloc[val_end:]
+        
+        logger.info(f"时间序列数据划分:")
+        logger.info(f"  训练集: {len(train_features)} 行 ({train_ratio:.0%})")
+        logger.info(f"  验证集: {len(val_features)} 行 ({val_ratio:.0%})")
+        logger.info(f"  测试集: {len(test_features)} 行 ({test_ratio:.0%})")
+        
+        if len(train_features) > 0 and len(test_features) > 0:
+            logger.info(f"  训练集时间范围: {train_features.index.min()} ~ {train_features.index.max()}")
+            logger.info(f"  验证集时间范围: {val_features.index.min()} ~ {val_features.index.max()}")
+            logger.info(f"  测试集时间范围: {test_features.index.min()} ~ {test_features.index.max()}")
+        
+        return train_features, val_features, test_features
+    
     def full_retrain(self, symbol: str) -> Dict:
         """
         完整重训（从零开始）
+        
+        修复数据泄漏问题：
+        1. 先按时间划分数据为 train/val/test
+        2. HMM 只在训练集上拟合
+        3. LSTM 使用独立的验证集和测试集
         
         Args:
             symbol: 交易对
@@ -50,7 +103,7 @@ class TrainingPipeline:
         logger.info(f"="*80)
         
         # 1. 获取数据
-        logger.info("步骤 1/5: 获取历史数据...")
+        logger.info("步骤 1/6: 获取历史数据...")
         data = self.data_fetcher.fetch_full_training_data(
             symbol=symbol,
             timeframes=self.config.TIMEFRAMES,
@@ -63,7 +116,7 @@ class TrainingPipeline:
         logger.info(f"API 请求统计: {stats}")
         
         # 2. 特征工程
-        logger.info("步骤 2/5: 计算技术指标...")
+        logger.info("步骤 2/6: 计算技术指标...")
         features = self.feature_engineer.combine_timeframe_features(
             data,
             primary_timeframe=self.config.PRIMARY_TIMEFRAME,
@@ -75,25 +128,39 @@ class TrainingPipeline:
         
         logger.info(f"特征数量: {len(features.columns)}, 样本数: {len(features)}")
         
-        # 3. HMM 标注
-        logger.info("步骤 3/5: HMM 状态标注...")
+        # 3. 按时间划分数据（关键步骤：避免数据泄漏）
+        logger.info("步骤 3/6: 按时间划分数据...")
+        train_features, val_features, test_features = self._split_data_by_time(
+            features,
+            train_ratio=self.config.TRAIN_RATIO,
+            val_ratio=self.config.VAL_RATIO,
+            test_ratio=self.config.TEST_RATIO
+        )
+        
+        # 4. HMM 标注（只在训练集上拟合，避免数据泄漏）
+        logger.info("步骤 4/6: HMM 状态标注（只在训练集上拟合）...")
         hmm_labeler = HMMRegimeLabeler(
             n_states=self.config.N_STATES,
             n_components=self.config.N_PCA_COMPONENTS
         )
         
-        states = hmm_labeler.fit(features)
+        # 使用新方法：在训练集上拟合，分别预测各数据集的标签
+        train_states, val_states, test_states = hmm_labeler.fit_predict_split(
+            train_features=train_features,
+            val_features=val_features,
+            test_features=test_features
+        )
         
         # 保存 HMM 模型
         hmm_path = self.config.get_hmm_path(symbol)
         hmm_labeler.save(hmm_path)
         
-        # 分析市场状态
-        regime_analysis = hmm_labeler.analyze_regimes(features, states)
-        logger.info(f"\n市场状态分析:\n{regime_analysis}")
+        # 分析市场状态（只用训练集分析，避免泄漏）
+        regime_analysis = hmm_labeler.analyze_regimes(train_features, train_states)
+        logger.info(f"\n训练集市场状态分析:\n{regime_analysis}")
         
-        # 4. 准备 LSTM 训练数据
-        logger.info("步骤 4/5: 准备 LSTM 训练数据...")
+        # 5. 准备 LSTM 训练数据
+        logger.info("步骤 5/6: 准备 LSTM 训练数据...")
         lstm_classifier = LSTMRegimeClassifier(
             n_states=self.config.N_STATES,
             sequence_length=self.config.SEQUENCE_LENGTH,
@@ -105,41 +172,67 @@ class TrainingPipeline:
             learning_rate=self.config.LEARNING_RATE
         )
         
-        X_train, X_test, y_train, y_test = lstm_classifier.prepare_data(
-            features, states, test_size=self.config.VALIDATION_SPLIT
+        # 使用新方法：支持 train/val/test 三分
+        X_train, y_train, X_val, y_val, X_test, y_test = lstm_classifier.prepare_data_split(
+            train_features=train_features,
+            train_labels=train_states,
+            val_features=val_features,
+            val_labels=val_states,
+            test_features=test_features,
+            test_labels=test_states
         )
         
-        # 5. 训练 LSTM
-        logger.info("步骤 5/5: 训练 LSTM 模型...")
+        # 6. 训练 LSTM
+        logger.info("步骤 6/6: 训练 LSTM 模型...")
         model_path = self.config.get_model_path(symbol)
         
+        # 使用验证集进行早停和模型选择
         history = lstm_classifier.train(
             X_train, y_train,
-            X_test, y_test,
+            X_val, y_val,  # 验证集用于早停
             epochs=self.config.EPOCHS,
             batch_size=self.config.BATCH_SIZE,
+            early_stopping_patience=self.config.EARLY_STOPPING_PATIENCE,
+            lr_reduce_patience=self.config.LR_REDUCE_PATIENCE,
             model_path=model_path,
             use_class_weight=self.config.USE_CLASS_WEIGHT
         )
         
-        # 评估模型
-        eval_results = lstm_classifier.evaluate(X_test, y_test)
+        # 在独立测试集上评估模型（这才是真实的泛化性能）
+        logger.info("在独立测试集上评估模型...")
+        if X_test is not None and y_test is not None:
+            eval_results = lstm_classifier.evaluate(X_test, y_test)
+            logger.info(f"🎯 测试集准确率: {eval_results['accuracy']:.4f} (这是真实的泛化性能)")
+        else:
+            # 如果没有测试集，使用验证集评估（不推荐）
+            eval_results = lstm_classifier.evaluate(X_val, y_val)
+            logger.warning("⚠️ 没有独立测试集，使用验证集评估（结果可能偏乐观）")
+        
+        # 同时输出验证集准确率作为参考
+        val_eval = lstm_classifier.evaluate(X_val, y_val)
+        logger.info(f"验证集准确率: {val_eval['accuracy']:.4f}")
         
         # 保存模型和标准化器
         scaler_path = self.config.get_scaler_path(symbol)
         lstm_classifier.save(model_path, scaler_path)
         
         logger.info(f"完整重训完成: {symbol}")
-        logger.info(f"模型准确率: {eval_results['accuracy']:.4f}")
+        logger.info(f"测试集准确率: {eval_results['accuracy']:.4f}")
         
         return {
             'symbol': symbol,
             'training_type': 'full_retrain',
             'timestamp': datetime.now(),
-            'accuracy': eval_results['accuracy'],
-            'loss': eval_results['loss'],
+            'test_accuracy': eval_results['accuracy'],
+            'val_accuracy': val_eval['accuracy'],
+            'test_loss': eval_results['loss'],
             'regime_analysis': regime_analysis,
-            'history': history
+            'history': history,
+            'data_split': {
+                'train_samples': len(train_features),
+                'val_samples': len(val_features),
+                'test_samples': len(test_features)
+            }
         }
     
     def incremental_train(self, symbol: str) -> Dict:

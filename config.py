@@ -21,7 +21,7 @@ class TrainingConfig:
     PRIMARY_TIMEFRAME = "15m"  # 主时间框架
     
     # 完整重训数据长度（天）
-    FULL_RETRAIN_DAYS = 365  # 12个月
+    FULL_RETRAIN_DAYS = 730  # 24个月（2年）- 增加数据量以改善类别不平衡
     
     # 增量训练数据长度（天）
     INCREMENTAL_TRAIN_DAYS = 30  # 最近30天
@@ -44,16 +44,31 @@ class TrainingConfig:
     SEQUENCE_LENGTH = 64  # LSTM 输入序列长度
     LSTM_UNITS = [128, 64]  # LSTM 层配置
     DENSE_UNITS = [64]  # 全连接层配置
-    DROPOUT_RATE = 0.2
+    DROPOUT_RATE = 0.3  # 增加dropout以缓解过拟合
     EPOCHS = 50
     BATCH_SIZE = 32
+    
+    # ============ 数据划分配置（避免数据泄漏） ============
+    # 使用 train/val/test 三分（而不是旧的 train/test 二分）
+    # - 训练集：用于训练模型
+    # - 验证集：用于早停和超参数调优
+    # - 测试集：只用于最终评估，不参与任何模型选择
+    TRAIN_RATIO = 0.70  # 训练集比例
+    VAL_RATIO = 0.15    # 验证集比例
+    TEST_RATIO = 0.15   # 测试集比例
+    
+    # 旧配置（保持向后兼容，但不推荐使用）
     VALIDATION_SPLIT = 0.2
     
     # ============ 正则化配置 ============
-    L2_LAMBDA = 1e-4  # L2 正则化强度（权重衰减）; 过拟合严重 → 增大 (如 1e-3); 欠拟合 → 减小 (如 1e-5)
+    L2_LAMBDA = 1e-3  # L2 正则化强度（权重衰减）; 已增大以缓解过拟合（从1e-4增加到1e-3）
     USE_BATCH_NORM = True  # 是否使用 BatchNormalization
     LEARNING_RATE = 1e-3  # Adam 优化器学习率
     USE_CLASS_WEIGHT = True  # 是否使用类权重（处理类别不平衡问题，让稀有状态的错误代价更高）
+    
+    # ============ 训练回调配置 ============
+    EARLY_STOPPING_PATIENCE = 8  # 早停耐心值（验证损失不改善的epoch数）
+    LR_REDUCE_PATIENCE = 5  # 学习率衰减耐心值（验证损失不改善的epoch数后降低学习率）
     
     # ============ 增量训练配置 ============
     INCREMENTAL_EPOCHS = 10  # 增量训练轮数

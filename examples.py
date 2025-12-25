@@ -35,8 +35,10 @@ def example_1_single_symbol_training():
         result = pipeline.full_retrain("BTCUSDT")
         
         print(f"\n✅ 训练完成！")
-        print(f"准确率: {result['accuracy']:.2%}")
-        print(f"损失: {result['loss']:.4f}")
+        print(f"测试集准确率: {result['test_accuracy']:.2%}")
+        print(f"测试集损失: {result['test_loss']:.4f}")
+        if 'val_accuracy' in result:
+            print(f"验证集准确率: {result['val_accuracy']:.2%}")
     except KeyboardInterrupt:
         print("\n\n⚠️  训练被用户中断")
         raise
@@ -73,7 +75,7 @@ def example_2_multiple_symbols_training():
         if 'error' in result:
             print(f"{symbol}: 失败 - {result['error']}")
         else:
-            print(f"{symbol}: 准确率 {result['accuracy']:.2%}")
+            print(f"{symbol}: 测试集准确率 {result['test_accuracy']:.2%}")
 
 
 def example_3_realtime_prediction():

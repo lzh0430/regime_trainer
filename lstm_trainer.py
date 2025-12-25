@@ -1,5 +1,11 @@
 """
 LSTM 训练模块 - 用于市场状态预测
+
+修复数据泄漏问题：
+- 支持 train/val/test 三分（而不是 train/test 二分）
+- Scaler 只在训练集上 fit
+- 验证集用于早停和模型选择
+- 测试集只用于最终评估
 """
 import numpy as np
 import pandas as pd
@@ -7,10 +13,9 @@ import tensorflow as tf
 from tensorflow import keras
 # 使用 keras.layers 和 keras.callbacks 而不是直接导入，避免 linter 警告
 from sklearn.preprocessing import StandardScaler
-# train_test_split 已移除，改用手动按时间顺序划分以避免数据泄露
 import pickle
 import logging
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 import os
 
 logger = logging.getLogger(__name__)
@@ -149,51 +154,64 @@ class LSTMRegimeClassifier:
             y.append(labels[i+self.sequence_length])
         return np.array(X), np.array(y)
     
-    def prepare_data(
+    def prepare_data_split(
         self,
-        features: pd.DataFrame,
-        labels: np.ndarray,
-        test_size: float = 0.2
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        train_features: pd.DataFrame,
+        train_labels: np.ndarray,
+        val_features: pd.DataFrame,
+        val_labels: np.ndarray,
+        test_features: Optional[pd.DataFrame] = None,
+        test_labels: Optional[np.ndarray] = None
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, 
+               Optional[np.ndarray], Optional[np.ndarray]]:
         """
-        准备训练数据（修复数据泄露问题）
+        准备训练数据（推荐方法：支持 train/val/test 三分）
+        
+        此方法接收已经划分好的数据，确保：
+        - Scaler 只在训练集上 fit
+        - 验证集和测试集只做 transform
+        - 避免任何形式的数据泄漏
         
         Args:
-            features: 特征 DataFrame
-            labels: 标签数组（来自 HMM）
-            test_size: 测试集比例
+            train_features: 训练集特征
+            train_labels: 训练集标签
+            val_features: 验证集特征
+            val_labels: 验证集标签
+            test_features: 测试集特征（可选）
+            test_labels: 测试集标签（可选）
             
         Returns:
-            (X_train, X_test, y_train, y_test)
+            (X_train, y_train, X_val, y_val, X_test, y_test)
+            如果没有测试集，X_test 和 y_test 为 None
         """
-        # 保存特征名称（用于增量训练时的特征对齐）
-        self.feature_names_ = list(features.columns)
+        # 保存特征名称
+        self.feature_names_ = list(train_features.columns)
         
-        # ============ 修复数据泄露：先划分，再标准化 ============
-        # 按时间顺序划分训练集和测试集（时间序列不能 shuffle）
-        split_idx = int(len(features) * (1 - test_size))
-        
-        train_features = features.iloc[:split_idx]
-        test_features = features.iloc[split_idx:]
-        train_labels = labels[:split_idx]
-        test_labels = labels[split_idx:]
-        
-        logger.info(f"数据划分: 训练集 {len(train_features)} 行, 测试集 {len(test_features)} 行")
+        logger.info(f"数据划分: 训练集 {len(train_features)} 行, "
+                   f"验证集 {len(val_features)} 行, "
+                   f"测试集 {len(test_features) if test_features is not None else 0} 行")
         
         # 只在训练集上 fit scaler（避免数据泄露）
         self.scaler = StandardScaler()
         train_scaled = self.scaler.fit_transform(train_features)
         
-        # 用训练集的 scaler 参数 transform 测试集
-        test_scaled = self.scaler.transform(test_features)
+        # 用训练集的 scaler 参数 transform 验证集
+        val_scaled = self.scaler.transform(val_features)
         
-        # 分别创建训练和测试的序列数据
+        # 创建训练和验证的序列数据
         X_train, y_train = self._create_sequences(train_scaled, train_labels)
-        X_test, y_test = self._create_sequences(test_scaled, test_labels)
+        X_val, y_val = self._create_sequences(val_scaled, val_labels)
         
-        logger.info(f"序列数据形状: X_train={X_train.shape}, X_test={X_test.shape}")
+        logger.info(f"序列数据形状: X_train={X_train.shape}, X_val={X_val.shape}")
         
-        return X_train, X_test, y_train, y_test
+        # 处理测试集（如果有）
+        X_test, y_test = None, None
+        if test_features is not None and test_labels is not None:
+            test_scaled = self.scaler.transform(test_features)
+            X_test, y_test = self._create_sequences(test_scaled, test_labels)
+            logger.info(f"测试集序列形状: X_test={X_test.shape}")
+        
+        return X_train, y_train, X_val, y_val, X_test, y_test
     
     def train(
         self,
@@ -204,8 +222,10 @@ class LSTMRegimeClassifier:
         epochs: int = 50,
         batch_size: int = 32,
         early_stopping: bool = True,
+        early_stopping_patience: int = 8,
         model_path: str = None,
-        use_class_weight: bool = True
+        use_class_weight: bool = True,
+        lr_reduce_patience: int = 5
     ) -> Dict:
         """
         训练模型
@@ -218,8 +238,10 @@ class LSTMRegimeClassifier:
             epochs: 训练轮数
             batch_size: 批次大小
             early_stopping: 是否使用早停
+            early_stopping_patience: 早停耐心值（验证损失不改善的epoch数）
             model_path: 模型保存路径
             use_class_weight: 是否使用类权重（处理类别不平衡）
+            lr_reduce_patience: 学习率衰减耐心值
             
         Returns:
             训练历史
@@ -251,7 +273,7 @@ class LSTMRegimeClassifier:
         if early_stopping:
             early_stop = keras.callbacks.EarlyStopping(
                 monitor='val_loss',
-                patience=10,
+                patience=early_stopping_patience,
                 restore_best_weights=True
             )
             callback_list.append(early_stop)
@@ -260,7 +282,7 @@ class LSTMRegimeClassifier:
         lr_scheduler = keras.callbacks.ReduceLROnPlateau(
             monitor='val_loss',
             factor=0.5,
-            patience=5,
+            patience=lr_reduce_patience,
             min_lr=1e-6
         )
         callback_list.append(lr_scheduler)
