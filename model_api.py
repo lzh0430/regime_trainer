@@ -2,9 +2,11 @@
 模型 API 模块 - 为其他项目提供简单的预测接口
 
 这个模块提供了简单的接口，让其他项目可以方便地：
-1. 预测未来N根K线的market regime概率分布
+1. 预测下一根K线的market regime概率分布
 2. 获取模型元数据（状态映射、时间框架等）
 3. 查询可用的交易对和模型信息
+
+注意：LSTM模型只能预测下一根K线的market regime，不能预测多根K线。
 """
 import logging
 import os
@@ -27,11 +29,10 @@ class ModelAPI:
     使用示例:
         api = ModelAPI()
         
-        # 预测未来6根15分钟K线的market regime
-        result = api.predict_future_regimes(
+        # 预测下一根15分钟K线的market regime
+        result = api.predict_next_regime(
             symbol="BTCUSDT",
-            timeframe="15m",
-            n_bars=6
+            timeframe="15m"
         )
         
         # 获取模型元数据
@@ -67,30 +68,28 @@ class ModelAPI:
         
         return self._predictors[symbol]
     
-    def predict_future_regimes(
+    def predict_next_regime(
         self,
         symbol: str,
-        timeframe: str = "15m",
-        n_bars: int = 6
+        timeframe: str = "15m"
     ) -> Dict:
         """
-        预测未来N根K线的market regime概率分布
+        预测下一根K线的market regime概率分布
         
-        注意：LSTM模型训练时预测的是"下一根K线"的状态。
-        对于未来N根K线的预测，我们返回当前预测的状态概率分布，
-        这代表了基于当前市场状态，未来N根K线最可能的market regime。
+        重要说明：
+        - LSTM模型训练时预测的是"下一根K线"的状态
+        - 模型使用过去64根K线的特征序列来预测下一根K线的状态
+        - 这是单步预测，不能直接预测多根K线
         
         Args:
             symbol: 交易对（如 "BTCUSDT"）
             timeframe: 时间框架（如 "15m", "1h"），必须与训练时的主时间框架一致
-            n_bars: 要预测的K线数量（默认6根）
             
         Returns:
             包含预测结果的字典:
             {
                 'symbol': str,  # 交易对
                 'timeframe': str,  # 时间框架
-                'n_bars': int,  # 预测的K线数量
                 'timestamp': datetime,  # 预测时间
                 'regime_probabilities': {  # 各状态的概率分布
                     'State_0': float,  # 或语义名称如 'Strong_Trend'
@@ -102,10 +101,13 @@ class ModelAPI:
                     'name': str,
                     'probability': float
                 },
+                'confidence': float,  # 置信度（最高概率）
+                'is_uncertain': bool,  # 是否不确定（置信度过低）
                 'model_info': {  # 模型信息
                     'primary_timeframe': str,
                     'n_states': int,
-                    'regime_mapping': dict
+                    'regime_mapping': dict,
+                    'sequence_length': int  # 使用的历史K线数量
                 }
             }
         """
@@ -121,7 +123,7 @@ class ModelAPI:
         # 获取预测器
         predictor = self._get_predictor(symbol)
         
-        # 获取当前市场状态预测
+        # 获取当前市场状态预测（实际上是预测下一根K线）
         current_regime = predictor.get_current_regime()
         
         # 提取概率分布
@@ -134,12 +136,12 @@ class ModelAPI:
         
         # 获取模型元数据
         model_info = self._get_model_info(predictor)
+        model_info['sequence_length'] = predictor.lstm_classifier.sequence_length
         
         # 构建结果
         result = {
             'symbol': symbol,
             'timeframe': timeframe,
-            'n_bars': n_bars,
             'timestamp': datetime.now(),
             'regime_probabilities': regime_probs,
             'most_likely_regime': {
@@ -153,11 +155,40 @@ class ModelAPI:
         }
         
         logger.info(
-            f"{symbol} 未来{n_bars}根{timeframe}K线预测: "
+            f"{symbol} 下一根{timeframe}K线预测: "
             f"{most_likely_name} (概率: {most_likely_prob:.2%})"
         )
         
         return result
+    
+    # 保持向后兼容（已废弃，建议使用 predict_next_regime）
+    def predict_future_regimes(
+        self,
+        symbol: str,
+        timeframe: str = "15m",
+        n_bars: int = 1
+    ) -> Dict:
+        """
+        [已废弃] 预测未来N根K线的market regime概率分布
+        
+        注意：此方法已废弃。模型实际上只能预测下一根K线。
+        请使用 predict_next_regime() 方法。
+        
+        Args:
+            symbol: 交易对
+            timeframe: 时间框架
+            n_bars: 已废弃，将被忽略（模型只能预测1根K线）
+            
+        Returns:
+            预测结果（实际只预测下一根K线）
+        """
+        if n_bars != 1:
+            logger.warning(
+                f"predict_future_regimes() 中的 n_bars={n_bars} 参数将被忽略。"
+                f"模型只能预测下一根K线。请使用 predict_next_regime() 方法。"
+            )
+        
+        return self.predict_next_regime(symbol, timeframe)
     
     def get_model_metadata(self, symbol: str) -> Dict:
         """
@@ -258,16 +289,14 @@ class ModelAPI:
     def batch_predict(
         self,
         symbols: List[str],
-        timeframe: str = "15m",
-        n_bars: int = 6
+        timeframe: str = "15m"
     ) -> Dict[str, Dict]:
         """
-        批量预测多个交易对
+        批量预测多个交易对的下一根K线
         
         Args:
             symbols: 交易对列表
             timeframe: 时间框架
-            n_bars: 要预测的K线数量
             
         Returns:
             {symbol: prediction_result} 字典
@@ -276,10 +305,9 @@ class ModelAPI:
         
         for symbol in symbols:
             try:
-                results[symbol] = self.predict_future_regimes(
+                results[symbol] = self.predict_next_regime(
                     symbol=symbol,
-                    timeframe=timeframe,
-                    n_bars=n_bars
+                    timeframe=timeframe
                 )
             except Exception as e:
                 logger.error(f"预测 {symbol} 失败: {e}")
@@ -291,25 +319,22 @@ class ModelAPI:
         self,
         symbol: str,
         regime_name: str,
-        timeframe: str = "15m",
-        n_bars: int = 6
+        timeframe: str = "15m"
     ) -> float:
         """
-        获取特定状态的概率（便捷方法）
+        获取下一根K线特定状态的概率（便捷方法）
         
         Args:
             symbol: 交易对
             regime_name: 状态名称（如 "Strong_Trend"）
             timeframe: 时间框架
-            n_bars: 要预测的K线数量
             
         Returns:
             该状态的概率（0.0-1.0）
         """
-        result = self.predict_future_regimes(
+        result = self.predict_next_regime(
             symbol=symbol,
-            timeframe=timeframe,
-            n_bars=n_bars
+            timeframe=timeframe
         )
         
         regime_probs = result['regime_probabilities']
@@ -333,45 +358,41 @@ class ModelAPI:
 def predict_regime(
     symbol: str,
     timeframe: str = "15m",
-    n_bars: int = 6,
     config: TrainingConfig = None
 ) -> Dict:
     """
-    便捷函数：预测未来N根K线的market regime
+    便捷函数：预测下一根K线的market regime
     
     Args:
         symbol: 交易对
         timeframe: 时间框架
-        n_bars: 要预测的K线数量
         config: 配置（可选）
         
     Returns:
         预测结果字典
         
     示例:
-        result = predict_regime("BTCUSDT", "15m", 6)
+        result = predict_regime("BTCUSDT", "15m")
         print(result['most_likely_regime']['name'])
         print(result['regime_probabilities'])
     """
     api = ModelAPI(config)
-    return api.predict_future_regimes(symbol, timeframe, n_bars)
+    return api.predict_next_regime(symbol, timeframe)
 
 
 def get_regime_probability(
     symbol: str,
     regime_name: str,
     timeframe: str = "15m",
-    n_bars: int = 6,
     config: TrainingConfig = None
 ) -> float:
     """
-    便捷函数：获取特定状态的概率
+    便捷函数：获取下一根K线特定状态的概率
     
     Args:
         symbol: 交易对
         regime_name: 状态名称
         timeframe: 时间框架
-        n_bars: 要预测的K线数量
         config: 配置（可选）
         
     Returns:
@@ -382,7 +403,7 @@ def get_regime_probability(
         print(f"Strong_Trend 概率: {prob:.2%}")
     """
     api = ModelAPI(config)
-    return api.get_regime_probability(symbol, regime_name, timeframe, n_bars)
+    return api.get_regime_probability(symbol, regime_name, timeframe)
 
 
 # ==================== 主函数（示例） ====================
@@ -402,16 +423,16 @@ def main():
     # 使用第一个可用的交易对
     symbol = available[0]
     
-    # 预测未来6根15分钟K线的market regime
-    print(f"\n预测 {symbol} 未来6根15分钟K线的market regime:")
+    # 预测下一根15分钟K线的market regime
+    print(f"\n预测 {symbol} 下一根15分钟K线的market regime:")
     print("=" * 70)
     
-    result = api.predict_future_regimes(symbol, "15m", 6)
+    result = api.predict_next_regime(symbol, "15m")
     
     print(f"交易对: {result['symbol']}")
     print(f"时间框架: {result['timeframe']}")
-    print(f"预测K线数: {result['n_bars']}")
     print(f"预测时间: {result['timestamp']}")
+    print(f"使用历史K线数: {result['model_info']['sequence_length']}")
     print(f"\n最可能的状态: {result['most_likely_regime']['name']}")
     print(f"概率: {result['most_likely_regime']['probability']:.2%}")
     print(f"置信度: {result['confidence']:.2%}")

@@ -34,7 +34,7 @@ def test_list_models():
 def test_predict_regime(symbol: str = None):
     """测试预测market regime"""
     print("\n" + "="*70)
-    print("测试 2: 预测未来6根K线的market regime")
+    print("测试 2: 预测下一根K线的market regime")
     print("="*70)
     
     api = ModelAPI()
@@ -52,13 +52,13 @@ def test_predict_regime(symbol: str = None):
         symbol = available[0]
     
     try:
-        result = api.predict_future_regimes(symbol, "15m", 6)
+        result = api.predict_next_regime(symbol, "15m")
         
         print(f"\n✓ 预测成功:")
         print(f"  交易对: {result['symbol']}")
         print(f"  时间框架: {result['timeframe']}")
-        print(f"  预测K线数: {result['n_bars']}")
         print(f"  预测时间: {result['timestamp']}")
+        print(f"  使用历史K线数: {result['model_info']['sequence_length']}")
         print(f"\n  最可能的状态: {result['most_likely_regime']['name']}")
         print(f"  概率: {result['most_likely_regime']['probability']:.2%}")
         print(f"  置信度: {result['confidence']:.2%}")
@@ -103,7 +103,7 @@ def test_get_regime_probability(symbol: str = None):
         # 测试获取几个状态的概率
         regime_names = ["Strong_Trend", "Range", "Volatility_Spike"]
         
-        print(f"\n✓ 获取 {symbol} 的状态概率:")
+        print(f"\n✓ 获取 {symbol} 下一根K线的状态概率:")
         for regime_name in regime_names:
             prob = api.get_regime_probability(symbol, regime_name)
             print(f"  {regime_name:25s} {prob:6.2%}")
@@ -213,7 +213,7 @@ def test_convenience_functions(symbol: str = None):
     try:
         # 测试便捷函数 predict_regime
         print(f"\n✓ 测试便捷函数 predict_regime():")
-        result = predict_regime(symbol, "15m", 6)
+        result = predict_regime(symbol, "15m")
         print(f"  最可能状态: {result['most_likely_regime']['name']}")
         
         # 测试便捷函数 get_regime_probability

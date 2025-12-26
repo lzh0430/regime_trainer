@@ -4,10 +4,12 @@
 
 ## 核心功能
 
-- 🎯 **预测未来N根K线的market regime概率分布**
+- 🎯 **预测下一根K线的market regime概率分布**
 - 🔄 **自动化训练**：增量训练（每天2次）+ 完整重训（每周1次）
 - 📊 **6种市场状态**：Strong_Trend, Weak_Trend, Range, Choppy_High_Vol, Volatility_Spike, Squeeze
 - 🔌 **简单API接口**：供其他项目调用
+
+**重要说明**：LSTM模型使用过去64根K线的特征序列，预测下一根K线的market regime。这是单步预测，不能直接预测多根K线。
 
 ## 快速开始
 
@@ -30,8 +32,8 @@ python training_pipeline.py  # 训练所有交易对
 ```python
 from model_api import predict_regime
 
-# 预测未来6根15分钟K线的market regime
-result = predict_regime("BTCUSDT", "15m", 6)
+# 预测下一根15分钟K线的market regime
+result = predict_regime("BTCUSDT", "15m")
 
 print(f"最可能的状态: {result['most_likely_regime']['name']}")
 print(f"概率: {result['most_likely_regime']['probability']:.2%}")
@@ -49,11 +51,10 @@ from model_api import ModelAPI
 # 初始化API
 api = ModelAPI()
 
-# 预测未来6根15分钟K线的market regime
-result = api.predict_future_regimes(
+# 预测下一根15分钟K线的market regime
+result = api.predict_next_regime(
     symbol="BTCUSDT",
-    timeframe="15m",  # 必须与训练时的主时间框架一致
-    n_bars=6         # 要预测的K线数量
+    timeframe="15m"  # 必须与训练时的主时间框架一致
 )
 ```
 
@@ -63,7 +64,6 @@ result = api.predict_future_regimes(
 {
     'symbol': 'BTCUSDT',
     'timeframe': '15m',
-    'n_bars': 6,
     'timestamp': datetime.datetime(2024, 1, 15, 10, 30, 0),
     'regime_probabilities': {
         'Strong_Trend': 0.35,
@@ -83,6 +83,7 @@ result = api.predict_future_regimes(
     'model_info': {
         'primary_timeframe': '15m',
         'n_states': 6,
+        'sequence_length': 64,  # 使用的历史K线数量
         'regime_mapping': {
             0: 'Choppy_High_Vol',
             1: 'Strong_Trend',
@@ -156,8 +157,7 @@ api = ModelAPI()
 # Request
 results = api.batch_predict(
     symbols=["BTCUSDT", "ETHUSDT"],
-    timeframe="15m",
-    n_bars=6
+    timeframe="15m"
 )
 
 # Response

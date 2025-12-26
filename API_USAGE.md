@@ -2,6 +2,10 @@
 
 这个文档说明如何使用 `model_api.py` 模块，让其他项目可以方便地获取 market regime 预测结果。
 
+## 重要说明
+
+**LSTM模型只能预测下一根K线的market regime**。模型使用过去64根K线的特征序列来预测下一根K线的状态。这是单步预测，不能直接预测多根K线。
+
 ## 快速开始
 
 ### 基本用法
@@ -11,14 +15,13 @@ from model_api import ModelAPI, predict_regime, get_regime_probability
 
 # 方式1: 使用 ModelAPI 类
 api = ModelAPI()
-result = api.predict_future_regimes(
+result = api.predict_next_regime(
     symbol="BTCUSDT",
-    timeframe="15m",
-    n_bars=6
+    timeframe="15m"
 )
 
 # 方式2: 使用便捷函数
-result = predict_regime("BTCUSDT", "15m", 6)
+result = predict_regime("BTCUSDT", "15m")
 ```
 
 ### 返回结果格式
@@ -27,7 +30,6 @@ result = predict_regime("BTCUSDT", "15m", 6)
 {
     'symbol': 'BTCUSDT',                    # 交易对
     'timeframe': '15m',                      # 时间框架
-    'n_bars': 6,                            # 预测的K线数量
     'timestamp': datetime(...),              # 预测时间
     'regime_probabilities': {               # 各状态的概率分布
         'Strong_Trend': 0.35,
@@ -47,6 +49,7 @@ result = predict_regime("BTCUSDT", "15m", 6)
     'model_info': {                         # 模型信息
         'primary_timeframe': '15m',
         'n_states': 6,
+        'sequence_length': 64,              # 使用的历史K线数量
         'regime_mapping': {0: 'Choppy_High_Vol', 1: 'Strong_Trend', ...}
     }
 }
@@ -54,16 +57,15 @@ result = predict_regime("BTCUSDT", "15m", 6)
 
 ## API 方法详解
 
-### 1. 预测未来N根K线的market regime
+### 1. 预测下一根K线的market regime
 
 ```python
 api = ModelAPI()
 
-# 预测未来6根15分钟K线的market regime
-result = api.predict_future_regimes(
+# 预测下一根15分钟K线的market regime
+result = api.predict_next_regime(
     symbol="BTCUSDT",
-    timeframe="15m",      # 必须与训练时的主时间框架一致（默认15m）
-    n_bars=6              # 要预测的K线数量
+    timeframe="15m"      # 必须与训练时的主时间框架一致（默认15m）
 )
 
 # 获取最可能的状态
@@ -85,8 +87,7 @@ api = ModelAPI()
 prob = api.get_regime_probability(
     symbol="BTCUSDT",
     regime_name="Strong_Trend",
-    timeframe="15m",
-    n_bars=6
+    timeframe="15m"
 )
 
 # 方式2: 使用便捷函数
@@ -121,8 +122,7 @@ print(f"可用的交易对: {available}")
 api = ModelAPI()
 results = api.batch_predict(
     symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
-    timeframe="15m",
-    n_bars=6
+    timeframe="15m"
 )
 
 for symbol, result in results.items():
@@ -142,8 +142,8 @@ def check_market_regime(symbol: str):
     """检查市场状态并做出决策"""
     api = ModelAPI()
     
-    # 预测未来6根K线的market regime
-    result = api.predict_future_regimes(symbol, "15m", 6)
+    # 预测下一根K线的market regime
+    result = api.predict_next_regime(symbol, "15m")
     
     # 获取最可能的状态
     regime = result['most_likely_regime']
@@ -151,7 +151,7 @@ def check_market_regime(symbol: str):
     
     print(f"\n{symbol} 市场状态分析 ({datetime.now()})")
     print("=" * 60)
-    print(f"预测: 未来6根15分钟K线")
+    print(f"预测: 下一根15分钟K线")
     print(f"最可能状态: {regime['name']}")
     print(f"概率: {regime['probability']:.2%}")
     print(f"置信度: {confidence:.2%}")
@@ -201,7 +201,7 @@ if __name__ == "__main__":
 
 2. **模型必须先训练**: 使用API前，必须先训练对应交易对的模型。可以使用 `training_pipeline.py` 或 `examples.py` 进行训练。
 
-3. **预测说明**: LSTM模型训练时预测的是"下一根K线"的状态。对于未来N根K线的预测，API返回的是基于当前市场状态的概率分布，代表未来N根K线最可能的market regime。
+3. **预测说明**: LSTM模型只能预测下一根K线的状态。模型使用过去64根K线的特征序列来预测下一根K线的状态。
 
 4. **置信度阈值**: 如果最高概率低于配置的阈值（默认0.4），`is_uncertain` 会被设置为 `True`，表示预测不确定。
 
@@ -225,7 +225,7 @@ sys.path.append('/path/to/regime_trainer')
 
 from model_api import predict_regime
 
-result = predict_regime("BTCUSDT", "15m", 6)
+result = predict_regime("BTCUSDT", "15m")
 ```
 
 ### REST API 封装（可选）
@@ -241,7 +241,7 @@ api = ModelAPI()
 
 @app.route('/predict/<symbol>')
 def predict(symbol):
-    result = api.predict_future_regimes(symbol, "15m", 6)
+    result = api.predict_next_regime(symbol, "15m")
     return jsonify(result)
 
 if __name__ == '__main__':
@@ -254,7 +254,10 @@ if __name__ == '__main__':
 A: 使用 `api.list_available_models()` 方法。
 
 **Q: 预测结果中的概率分布是什么意思？**
-A: 每个概率表示该状态在未来N根K线中出现的可能性。所有概率之和为1.0。
+A: 每个概率表示该状态在下一根K线中出现的可能性。所有概率之和为1.0。
+
+**Q: 为什么不能预测多根K线？**
+A: LSTM模型训练时只学习预测下一根K线的状态。模型使用过去64根K线的特征序列来预测下一根K线的状态。如果需要预测多根K线，需要实现自回归预测或使用HMM转移矩阵，但预测精度会随着步数增加而下降。
 
 **Q: 可以预测其他时间框架吗？**
 A: 目前只支持训练时使用的主时间框架（默认15m）。要支持其他时间框架，需要重新训练模型。
