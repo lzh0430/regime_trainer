@@ -37,6 +37,26 @@ def example_1_single_symbol_training():
         if 'val_accuracy' in result:
             print(f"验证集准确率: {result['val_accuracy']:.2%}")
         
+        # 显示动态状态数量优化结果
+        if result.get('n_states_optimization'):
+            opt = result['n_states_optimization']
+            if opt['adjusted']:
+                print(f"\n🔄 状态数量已自动调整: {opt['original_n_states']} -> {opt['optimal_n_states']}")
+                
+                # 显示保留和删除的状态
+                all_names = {"Strong_Trend", "Weak_Trend", "Range", 
+                            "Choppy_High_Vol", "Volatility_Spike", "Squeeze"}
+                current_names = set(result.get('regime_mapping', {}).values())
+                removed_names = all_names - current_names
+                
+                print(f"   保留的状态: {sorted(current_names)}")
+                if removed_names:
+                    print(f"   删除的状态: {sorted(removed_names)}")
+            else:
+                print(f"\n✓ 状态数量保持不变: {opt['optimal_n_states']}")
+        
+        print(f"最终状态数量: {result.get('final_n_states', 6)}")
+        
         # 显示状态分布检查结果
         if 'state_distribution_check' in result:
             dist_check = result['state_distribution_check']
@@ -65,7 +85,7 @@ def example_2_multiple_symbols_training():
     print("="*80 + "\n")
     
     # 临时设置要训练的交易对
-    symbols = ["BTCUSDT", "ETHUSDT"]
+    symbols = TrainingConfig.SYMBOLS
     
     pipeline = TrainingPipeline(TrainingConfig)
     
@@ -87,7 +107,14 @@ def example_2_multiple_symbols_training():
             print(f"{symbol}: 失败 - {result['error']}")
         else:
             print(f"{symbol}: 测试集准确率 {result['test_accuracy']:.2%}")
-            # 显示状态分布警告
+            # 显示动态调整信息
+            if result.get('n_states_optimization') and result['n_states_optimization']['adjusted']:
+                opt = result['n_states_optimization']
+                print(f"  🔄 状态数量调整: {opt['original_n_states']} -> {opt['optimal_n_states']}")
+                
+                # 显示保留的状态名称
+                current_names = set(result.get('regime_mapping', {}).values())
+                print(f"  保留的状态: {sorted(current_names)}")
             if 'state_distribution_check' in result:
                 dist_check = result['state_distribution_check']
                 if not dist_check['healthy']:

@@ -76,6 +76,50 @@ class TrainingPipeline:
         
         return train_features, val_features, test_features
     
+    def _log_state_adjustment_summary(
+        self, 
+        original_n_states: int, 
+        new_n_states: int, 
+        new_mapping: Dict[int, str]
+    ):
+        """
+        输出状态调整的详细总结
+        
+        Args:
+            original_n_states: 原始状态数量
+            new_n_states: 调整后的状态数量
+            new_mapping: 新的状态映射
+        """
+        # 完整的 6 个语义名称
+        all_regime_names = {
+            "Strong_Trend", "Weak_Trend", "Range", 
+            "Choppy_High_Vol", "Volatility_Spike", "Squeeze"
+        }
+        
+        # 当前保留的语义名称
+        current_names = set(new_mapping.values())
+        
+        # 被删除的语义名称
+        removed_names = all_regime_names - current_names
+        
+        logger.info("=" * 70)
+        logger.info("📊 状态数量调整总结")
+        logger.info("=" * 70)
+        logger.info(f"  原始状态数量: {original_n_states}")
+        logger.info(f"  调整后数量:   {new_n_states}")
+        logger.info(f"  ")
+        logger.info(f"  ✅ 保留的状态 ({len(current_names)} 个):")
+        for name in sorted(current_names):
+            logger.info(f"     - {name}")
+        
+        if removed_names:
+            logger.info(f"  ")
+            logger.info(f"  ❌ 删除的状态 ({len(removed_names)} 个):")
+            for name in sorted(removed_names):
+                logger.info(f"     - {name} (该市场状态在验证/测试期未出现)")
+        
+        logger.info("=" * 70)
+    
     def full_retrain(self, symbol: str) -> Dict:
         """
         完整重训（从零开始）
@@ -189,6 +233,73 @@ class TrainingPipeline:
             min_ratio_per_state=getattr(self.config, 'MIN_RATIO_PER_STATE', 0.01)
         )
         
+        # ========== 动态调整状态数量 ==========
+        # 如果状态分布不健康且启用了自动调整，尝试优化状态数量
+        n_states_optimization = None
+        auto_adjust_enabled = getattr(self.config, 'AUTO_ADJUST_N_STATES', False)
+        
+        if auto_adjust_enabled and not state_distribution_check['healthy']:
+            missing_val = len(state_distribution_check['missing_states']['val'])
+            low_ratio_val = len(state_distribution_check['low_sample_states']['val'])
+            max_missing = getattr(self.config, 'MAX_MISSING_STATES_ALLOWED', 1)
+            max_low_ratio = getattr(self.config, 'MAX_LOW_RATIO_STATES_ALLOWED', 2)
+            
+            if missing_val > max_missing or low_ratio_val > max_low_ratio:
+                logger.info(f"🔄 状态分布不健康（缺失: {missing_val}, 低占比: {low_ratio_val}），尝试自动优化状态数量...")
+                
+                n_states_optimization = hmm_labeler.auto_optimize_n_states(
+                    train_features=train_features,
+                    val_features=val_features,
+                    test_features=test_features,
+                    n_states_min=getattr(self.config, 'N_STATES_MIN', 4),
+                    n_states_max=getattr(self.config, 'N_STATES_MAX', 8),
+                    max_missing_allowed=max_missing,
+                    max_low_ratio_allowed=max_low_ratio,
+                    strategy=getattr(self.config, 'N_STATES_ADJUST_STRATEGY', 'decrease_first'),
+                    min_samples_per_state=getattr(self.config, 'MIN_SAMPLES_PER_STATE', 10),
+                    min_ratio_per_state=getattr(self.config, 'MIN_RATIO_PER_STATE', 0.01)
+                )
+                
+                # 如果状态数量被调整，需要重新训练和映射
+                if n_states_optimization['adjusted']:
+                    new_n_states = n_states_optimization['optimal_n_states']
+                    logger.info(f"使用优化后的状态数量 {new_n_states} 重新训练...")
+                    
+                    # 重新训练
+                    train_states, val_states, test_states = hmm_labeler.retrain_with_n_states(
+                        n_states=new_n_states,
+                        train_features=train_features,
+                        val_features=val_features,
+                        test_features=test_features
+                    )
+                    
+                    # 重新映射（使用优先级选择名称）
+                    regime_mapping = hmm_labeler.auto_map_regimes(
+                        train_features, 
+                        train_states,
+                        min_vol_for_spike=getattr(self.config, 'REGIME_MIN_VOL_FOR_SPIKE', 0.02),
+                        max_vol_for_squeeze=getattr(self.config, 'REGIME_MAX_VOL_FOR_SQUEEZE', 0.01),
+                        min_adx_for_strong_trend=getattr(self.config, 'REGIME_MIN_ADX_FOR_STRONG_TREND', 30),
+                        max_adx_for_squeeze=getattr(self.config, 'REGIME_MAX_ADX_FOR_SQUEEZE', 20)
+                    )
+                    logger.info(f"优化后的状态映射: {regime_mapping}")
+                    
+                    # 重新检查分布
+                    state_distribution_check = hmm_labeler.check_state_distribution(
+                        train_states=train_states,
+                        val_states=val_states,
+                        test_states=test_states,
+                        min_samples_per_state=getattr(self.config, 'MIN_SAMPLES_PER_STATE', 10),
+                        min_ratio_per_state=getattr(self.config, 'MIN_RATIO_PER_STATE', 0.01)
+                    )
+                    
+                    # 输出状态调整总结
+                    self._log_state_adjustment_summary(
+                        original_n_states=n_states_optimization['original_n_states'],
+                        new_n_states=new_n_states,
+                        new_mapping=regime_mapping
+                    )
+        
         # 新旧映射比对（检测语义漂移）
         mapping_comparison = None
         if old_mapping is not None:
@@ -288,6 +399,8 @@ class TrainingPipeline:
             'dwell_times': dwell_times,  # 状态驻留时间分布
             'training_bic': hmm_labeler.training_bic_,  # HMM 训练的 BIC 值
             'bic_validation': bic_validation,  # BIC 状态数量验证结果
+            'n_states_optimization': n_states_optimization,  # 动态状态数量优化结果
+            'final_n_states': hmm_labeler.n_states,  # 最终使用的状态数量
             'history': history,
             'data_split': {
                 'train_samples': len(train_features),

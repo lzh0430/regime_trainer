@@ -11,8 +11,8 @@ class TrainingConfig:
     
     # ============ 交易对配置 ============
     SYMBOLS = [
-        "BTCUSDT",
-        "ETHUSDT",
+        # "BTCUSDT",
+        # "ETHUSDT",
         "SOLUSDT",
         "BNBUSDT",
         # 添加更多交易对
@@ -29,14 +29,37 @@ class TrainingConfig:
     INCREMENTAL_TRAIN_DAYS = 30  # 最近30天
     
     # ============ HMM 配置 ============
-    N_STATES = 6  # 市场状态数量
+    N_STATES = 6  # 市场状态数量（初始值，可被动态调整）
     N_PCA_COMPONENTS = 5  # PCA 降维后的特征数
+    
+    # ============ 动态状态数量调整 ============
+    # 当验证/测试集状态分布异常时，自动尝试调整状态数量
+    AUTO_ADJUST_N_STATES = True  # 是否启用动态调整
+    N_STATES_MIN = 4  # 最小状态数量
+    N_STATES_MAX = 8  # 最大状态数量
+    
+    # 触发调整的条件：
+    # 1. 验证集中完全缺失的状态数量 >= 此阈值
+    # 2. 或验证集中占比过低的状态数量 >= 此阈值
+    MAX_MISSING_STATES_ALLOWED = 1  # 允许最多缺失 1 个状态，超过则触发调整
+    MAX_LOW_RATIO_STATES_ALLOWED = 2  # 允许最多 2 个状态占比过低
+    
+    # 调整策略：
+    # - "decrease_first": 优先减少状态数量（适合波动率低的币种）
+    # - "bic_optimal": 使用 BIC 选择最优数量（更准确但更慢）
+    N_STATES_ADJUST_STRATEGY = "decrease_first"
     
     # 状态名称（仅作为回退/参考）
     # 注意：实际的状态映射由 HMM 模型在训练时自动生成并保存
     # HMM 是无监督聚类模型，状态编号是任意的
     # auto_map_regimes() 方法会根据特征统计（ADX、波动率等）自动确定每个状态的语义名称
     # 这个配置仅在加载旧版本模型（没有保存映射）时作为回退使用
+    # 
+    # 当 AUTO_ADJUST_N_STATES=True 时，实际状态数量可能少于 6 个
+    # 状态名称分配是完全数据驱动的：
+    # - 减少 n_states 后，HMM 会重新聚类
+    # - auto_map_regimes() 根据每个新聚类的特征（ADX、波动率等）分配最匹配的语义名称
+    # - 不存在"优先级"：某个状态在验证集中缺失说明该市场条件在当前数据中不存在
     REGIME_NAMES = {
         0: "Choppy_High_Vol",   # 高波动无方向
         1: "Strong_Trend",      # 强趋势

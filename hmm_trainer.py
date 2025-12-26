@@ -1160,7 +1160,15 @@ class HMMRegimeLabeler:
         Choppy_High_Vol, Strong_Trend, Volatility_Spike, Weak_Trend, Range, Squeeze
         
         这样无论 HMM 状态编号如何变化，相同语义的状态总是在同一位置显示。
+        
+        注意：如果 regime_mapping_ 未初始化（如在 auto_optimize_n_states 中），
+        此方法会跳过打印，避免输出全 0 的误导性信息。
         """
+        # 如果没有 regime_mapping，跳过按语义名称打印（避免全 0 输出）
+        if self.regime_mapping_ is None:
+            logger.debug("跳过按语义名称打印（regime_mapping 未初始化）")
+            return
+        
         # 定义语义名称的固定顺序（与 config.py REGIME_NAMES 一致）
         SEMANTIC_ORDER = [
             "Choppy_High_Vol",   # 高波动无方向
@@ -1172,10 +1180,8 @@ class HMMRegimeLabeler:
         ]
         
         # 构建语义名称到状态编号的反向映射
-        name_to_state = {}
-        if self.regime_mapping_ is not None:
-            for state, name in self.regime_mapping_.items():
-                name_to_state[name] = state
+        # 注意：到达这里时 regime_mapping_ 一定不是 None（已在上面检查）
+        name_to_state = {name: state for state, name in self.regime_mapping_.items()}
         
         # 计算各数据集的分布
         train_dist = np.bincount(train_states, minlength=self.n_states)
@@ -1328,3 +1334,211 @@ class HMMRegimeLabeler:
             状态特征 profile 列表
         """
         return self.state_profiles_
+    
+    # ==================== 动态状态数量优化 ====================
+    
+    def auto_optimize_n_states(
+        self,
+        train_features: pd.DataFrame,
+        val_features: pd.DataFrame,
+        test_features: Optional[pd.DataFrame] = None,
+        n_states_min: int = 4,
+        n_states_max: int = 8,
+        max_missing_allowed: int = 1,
+        max_low_ratio_allowed: int = 2,
+        strategy: str = "decrease_first",
+        min_samples_per_state: int = 10,
+        min_ratio_per_state: float = 0.01,
+        n_iter: int = 100
+    ) -> Dict:
+        """
+        自动优化状态数量，确保验证/测试集分布健康
+        
+        当验证/测试集中某些状态完全缺失或占比过低时，
+        自动尝试调整状态数量，找到一个使分布更健康的值。
+        
+        Args:
+            train_features: 训练集特征
+            val_features: 验证集特征
+            test_features: 测试集特征（可选）
+            n_states_min: 最小状态数量
+            n_states_max: 最大状态数量
+            max_missing_allowed: 允许的最大缺失状态数量
+            max_low_ratio_allowed: 允许的最大低占比状态数量
+            strategy: 调整策略
+                - "decrease_first": 优先减少状态数量
+                - "bic_optimal": 使用 BIC 选择最优数量
+            min_samples_per_state: 判断"样本过少"的阈值
+            min_ratio_per_state: 判断"占比过低"的阈值
+            n_iter: HMM 训练迭代次数
+            
+        Returns:
+            优化结果，包含最优 n_states、各尝试的结果等
+        """
+        logger.info("=" * 70)
+        logger.info("开始自动优化状态数量...")
+        logger.info(f"  策略: {strategy}")
+        logger.info(f"  状态数量范围: {n_states_min} - {n_states_max}")
+        logger.info(f"  允许缺失状态数: {max_missing_allowed}")
+        logger.info("=" * 70)
+        
+        original_n_states = self.n_states
+        results = {}
+        best_n_states = None
+        best_score = float('-inf')
+        
+        # 确定尝试的状态数量顺序
+        if strategy == "decrease_first":
+            # 从当前值开始，优先向下尝试
+            n_states_to_try = []
+            for n in range(original_n_states, n_states_min - 1, -1):
+                n_states_to_try.append(n)
+            for n in range(original_n_states + 1, n_states_max + 1):
+                n_states_to_try.append(n)
+        else:
+            # BIC 策略：尝试所有可能的值
+            n_states_to_try = list(range(n_states_min, n_states_max + 1))
+        
+        for n_states in n_states_to_try:
+            logger.info(f"\n尝试 n_states = {n_states}...")
+            
+            try:
+                # 创建临时 HMM 实例
+                temp_hmm = HMMRegimeLabeler(
+                    n_states=n_states,
+                    n_components=self.n_components,
+                    primary_timeframe=self.primary_timeframe
+                )
+                
+                # 训练并预测
+                train_states, val_states, test_states = temp_hmm.fit_predict_split(
+                    train_features, val_features, test_features, n_iter=n_iter
+                )
+                
+                # 检查分布健康度
+                dist_check = temp_hmm.check_state_distribution(
+                    train_states, val_states, test_states,
+                    min_samples_per_state, min_ratio_per_state
+                )
+                
+                # 计算评分
+                missing_val = len(dist_check['missing_states']['val'])
+                missing_test = len(dist_check['missing_states']['test'])
+                low_ratio_val = len(dist_check['low_sample_states']['val'])
+                
+                # 健康度评分（越高越好）
+                # - 每个缺失状态扣 10 分
+                # - 每个低占比状态扣 3 分
+                # - BIC 越低加分（归一化到 0-5 分）
+                health_score = 100 - (missing_val * 10) - (missing_test * 5) - (low_ratio_val * 3)
+                
+                # BIC 评分（需要在相同数据上比较才有意义）
+                bic = temp_hmm.training_bic_ if temp_hmm.training_bic_ else float('inf')
+                
+                result = {
+                    'n_states': n_states,
+                    'bic': bic,
+                    'missing_val': missing_val,
+                    'missing_test': missing_test,
+                    'low_ratio_val': low_ratio_val,
+                    'health_score': health_score,
+                    'is_healthy': dist_check['healthy'],
+                    'train_dist': dist_check['distributions']['train']['counts'],
+                    'val_dist': dist_check['distributions'].get('val', {}).get('counts', []),
+                }
+                
+                results[n_states] = result
+                
+                logger.info(f"  BIC: {bic:.2f}")
+                logger.info(f"  验证集缺失: {missing_val}, 测试集缺失: {missing_test}")
+                logger.info(f"  健康评分: {health_score}")
+                
+                # 检查是否满足条件
+                if missing_val <= max_missing_allowed and low_ratio_val <= max_low_ratio_allowed:
+                    if health_score > best_score:
+                        best_score = health_score
+                        best_n_states = n_states
+                        
+                        # 如果是 decrease_first 策略且找到满足条件的，立即返回
+                        if strategy == "decrease_first" and dist_check['healthy']:
+                            logger.info(f"✓ 找到健康的状态数量: {n_states}")
+                            break
+                            
+            except Exception as e:
+                logger.warning(f"  n_states={n_states} 训练失败: {e}")
+                results[n_states] = {'error': str(e)}
+        
+        # 如果没有找到完全健康的配置，选择最佳的
+        if best_n_states is None:
+            # 选择缺失最少的
+            valid_results = {k: v for k, v in results.items() if 'error' not in v}
+            if valid_results:
+                best_n_states = min(
+                    valid_results.keys(),
+                    key=lambda k: (valid_results[k]['missing_val'], valid_results[k]['missing_test'])
+                )
+                logger.warning(f"未找到完全健康的配置，选择最佳: n_states={best_n_states}")
+            else:
+                best_n_states = original_n_states
+                logger.warning(f"所有配置都失败，保持原值: n_states={best_n_states}")
+        
+        # 更新当前实例的 n_states
+        if best_n_states != original_n_states:
+            logger.info(f"🔄 状态数量调整: {original_n_states} -> {best_n_states}")
+            self.n_states = best_n_states
+        else:
+            logger.info(f"✓ 保持原状态数量: {best_n_states}")
+        
+        optimization_result = {
+            'original_n_states': original_n_states,
+            'optimal_n_states': best_n_states,
+            'adjusted': best_n_states != original_n_states,
+            'strategy': strategy,
+            'all_results': results,
+            'best_result': results.get(best_n_states, {}),
+            'message': (
+                f"状态数量从 {original_n_states} 调整为 {best_n_states}"
+                if best_n_states != original_n_states
+                else f"状态数量 {best_n_states} 已是最优"
+            )
+        }
+        
+        logger.info("=" * 70)
+        logger.info(f"状态数量优化完成: {optimization_result['message']}")
+        logger.info("=" * 70)
+        
+        return optimization_result
+    
+    def retrain_with_n_states(
+        self,
+        n_states: int,
+        train_features: pd.DataFrame,
+        val_features: Optional[pd.DataFrame] = None,
+        test_features: Optional[pd.DataFrame] = None,
+        n_iter: int = 100
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        使用新的状态数量重新训练
+        
+        Args:
+            n_states: 新的状态数量
+            train_features: 训练集特征
+            val_features: 验证集特征
+            test_features: 测试集特征
+            n_iter: HMM 训练迭代次数
+            
+        Returns:
+            (train_states, val_states, test_states)
+        """
+        logger.info(f"使用 n_states={n_states} 重新训练...")
+        
+        self.n_states = n_states
+        
+        # 重置模型
+        self.hmm_model = None
+        self.pca = None
+        self.scaler = None
+        self.regime_mapping_ = None
+        self.state_profiles_ = None
+        
+        return self.fit_predict_split(train_features, val_features, test_features, n_iter)
