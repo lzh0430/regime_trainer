@@ -210,7 +210,9 @@ class RealtimeRegimePredictor:
         """
         try:
             # 1. 获取最新数据
-            days = 3
+            # 增加到 7 天以确保所有时间框架都有足够的数据
+            # （特别是 1h 和更高时间框架，需要至少 200+ 根 K 线来计算 EMA_200）
+            days = 7
             
             data = self.data_fetcher.fetch_latest_data(
                 symbol=self.symbol,

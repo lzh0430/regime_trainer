@@ -136,11 +136,17 @@ class FeatureEngineer:
         features[f'{timeframe}_sma_20'] = ta.trend.SMAIndicator(df['close'], window=20).sma_indicator()
         features[f'{timeframe}_sma_50'] = ta.trend.SMAIndicator(df['close'], window=50).sma_indicator()
         
-        # ADX (趋势强度)
-        adx = ta.trend.ADXIndicator(df['high'], df['low'], df['close'])
-        features[f'{timeframe}_adx'] = adx.adx()
-        features[f'{timeframe}_adx_pos'] = adx.adx_pos()
-        features[f'{timeframe}_adx_neg'] = adx.adx_neg()
+        # ADX (趋势强度) - 需要至少 14 根 K 线
+        if len(df) >= 14:
+            adx = ta.trend.ADXIndicator(df['high'], df['low'], df['close'])
+            features[f'{timeframe}_adx'] = adx.adx()
+            features[f'{timeframe}_adx_pos'] = adx.adx_pos()
+            features[f'{timeframe}_adx_neg'] = adx.adx_neg()
+        else:
+            logger.warning(f"{timeframe} 数据量不足（{len(df)} 根），无法计算 ADX")
+            features[f'{timeframe}_adx'] = np.nan
+            features[f'{timeframe}_adx_pos'] = np.nan
+            features[f'{timeframe}_adx_neg'] = np.nan
         
         # ========== 波动率指标 ==========
         # ATR (真实波动幅度)
