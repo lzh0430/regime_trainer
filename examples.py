@@ -480,16 +480,17 @@ def example_10_5m_regime_history():
 
 
 def example_11_multi_timeframe_prediction():
-    """示例 11: 多时间框架并行预测 (5m + 15m)"""
+    """示例 11: 多时间框架并行预测 (5m + 15m + 1h)"""
     print("\n" + "="*80)
-    print("示例 11: 多时间框架并行预测 (5m + 15m)")
+    print("示例 11: 多时间框架并行预测 (5m + 15m + 1h)")
     print("="*80 + "\n")
     
     try:
         api = ModelAPI()
         
-        # 同时获取 5m 和 15m 的预测
-        results = api.predict_multi_timeframe_regimes("BTCUSDT", ["5m", "15m"])
+        # 同时获取所有启用时间框架的预测
+        timeframes = api.config.ENABLED_MODELS
+        results = api.predict_multi_timeframe_regimes("BTCUSDT", timeframes)
         
         print(f"\nBTCUSDT 多时间框架市场状态:")
         print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -514,19 +515,24 @@ def example_11_multi_timeframe_prediction():
                         bar = "█" * int(prob * 30)
                         print(f"    {regime:20s} {prob:6.2%} {bar}")
         
-        # 比较两个时间框架的状态
-        if '5m' in regimes and '15m' in regimes:
-            if 'error' not in regimes['5m'] and 'error' not in regimes['15m']:
-                r5m_t1 = regimes['5m'].get('predictions', {}).get('t+1', {}).get('most_likely', 'N/A')
-                r15m_t1 = regimes['15m'].get('predictions', {}).get('t+1', {}).get('most_likely', 'N/A')
-                
-                print(f"\n📊 时间框架对比 (t+1):")
-                print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                if r5m_t1 == r15m_t1:
-                    print(f"✓ 5m 和 15m 的 t+1 状态一致: {r5m_t1}")
-                else:
-                    print(f"⚠️ 5m ({r5m_t1}) 和 15m ({r15m_t1}) 的 t+1 状态不一致")
-                    print(f"   这可能表示市场正在发生短期变化")
+        # 比较所有时间框架的状态
+        valid_regimes = {tf: regimes[tf] for tf in timeframes if 'error' not in regimes.get(tf, {})}
+        if len(valid_regimes) >= 2:
+            print(f"\n📊 时间框架对比 (t+1):")
+            print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            t1_predictions = {}
+            for tf, result in valid_regimes.items():
+                t1_predictions[tf] = result.get('predictions', {}).get('t+1', {}).get('most_likely', 'N/A')
+            
+            # 检查是否所有预测一致
+            unique_predictions = set(t1_predictions.values())
+            if len(unique_predictions) == 1:
+                print(f"✓ 所有时间框架的 t+1 状态一致: {list(unique_predictions)[0]}")
+            else:
+                print(f"⚠️ 不同时间框架的 t+1 状态不一致:")
+                for tf, pred in t1_predictions.items():
+                    print(f"   {tf}: {pred}")
+                print(f"   这可能表示市场正在发生不同时间尺度的变化")
         
     except Exception as e:
         print(f"\n❌ 错误: {e}")
@@ -719,17 +725,18 @@ def example_15_multistep_api_5m():
 
 
 def example_16_compare_timeframes():
-    """示例 16: 对比 5m 和 15m 的多步预测"""
+    """示例 16: 对比多个时间框架的多步预测"""
     print("\n" + "="*80)
-    print("示例 16: 对比 5m 和 15m 的多步预测")
+    print("示例 16: 对比多个时间框架的多步预测")
     print("="*80 + "\n")
     
     try:
         api = ModelAPI()
         
-        # 获取两个时间框架的预测
+        # 获取所有启用时间框架的预测
+        timeframes = api.config.ENABLED_MODELS
         results = {}
-        for tf in ['5m', '15m']:
+        for tf in timeframes:
             try:
                 results[tf] = api.predict_regimes(
                     symbol="BTCUSDT",
@@ -742,43 +749,391 @@ def example_16_compare_timeframes():
         print(f"\nBTCUSDT 多时间框架多步预测对比:")
         print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         
-        # 并排显示
-        print(f"\n{'Horizon':<10} {'5m 预测':^25} {'15m 预测':^25}")
-        print("-" * 60)
+        # 动态生成表头
+        header = f"{'Horizon':<10}"
+        for tf in timeframes:
+            header += f" {tf:^25}"
+        print(f"\n{header}")
+        print("-" * (10 + 26 * len(timeframes)))
         
+        # 显示每个 horizon 的预测
         for horizon in ['t+1', 't+2', 't+3', 't+4']:
-            row_5m = "N/A"
-            row_15m = "N/A"
-            
-            if 'error' not in results.get('5m', {}):
-                pred = results['5m'].get('predictions', {}).get(horizon, {})
-                if pred:
-                    row_5m = f"{pred['most_likely'][:15]:15s} ({pred['confidence']:.0%})"
-            
-            if 'error' not in results.get('15m', {}):
-                pred = results['15m'].get('predictions', {}).get(horizon, {})
-                if pred:
-                    row_15m = f"{pred['most_likely'][:15]:15s} ({pred['confidence']:.0%})"
-            
-            print(f"{horizon:<10} {row_5m:^25} {row_15m:^25}")
+            row = f"{horizon:<10}"
+            for tf in timeframes:
+                if 'error' not in results.get(tf, {}):
+                    pred = results[tf].get('predictions', {}).get(horizon, {})
+                    if pred:
+                        row += f" {pred['most_likely'][:23]:^25}"
+                    else:
+                        row += f" {'N/A':^25}"
+                else:
+                    row += f" {'N/A':^25}"
+            print(row)
         
         # 时间对应关系
         print(f"\n⏱️ 时间对应关系:")
-        print(f"  5m:  t+1=5分钟, t+2=10分钟, t+3=15分钟, t+4=20分钟")
-        print(f"  15m: t+1=15分钟, t+2=30分钟, t+3=45分钟, t+4=60分钟")
+        timeframe_minutes = {
+            '5m': 5,
+            '15m': 15,
+            '1h': 60
+        }
+        for tf in timeframes:
+            minutes = timeframe_minutes.get(tf, 15)
+            print(f"  {tf}: t+1={minutes}分钟, t+2={minutes*2}分钟, t+3={minutes*3}分钟, t+4={minutes*4}分钟")
         
-        # 一致性分析
-        if 'error' not in results.get('5m', {}) and 'error' not in results.get('15m', {}):
-            pred_5m_t1 = results['5m'].get('predictions', {}).get('t+1', {}).get('most_likely')
-            pred_15m_t1 = results['15m'].get('predictions', {}).get('t+1', {}).get('most_likely')
-            
+        # 一致性分析（只分析有结果的时间框架）
+        valid_results = {tf: results[tf] for tf in timeframes if 'error' not in results.get(tf, {})}
+        if len(valid_results) >= 2:
             print(f"\n📊 t+1 一致性分析:")
-            if pred_5m_t1 == pred_15m_t1:
-                print(f"  ✓ 5m 和 15m 的 t+1 预测一致: {pred_5m_t1}")
+            t1_predictions = {}
+            for tf, result in valid_results.items():
+                t1_predictions[tf] = result.get('predictions', {}).get('t+1', {}).get('most_likely')
+            
+            # 检查是否所有预测一致
+            unique_predictions = set(t1_predictions.values())
+            if len(unique_predictions) == 1:
+                print(f"  ✓ 所有时间框架的 t+1 预测一致: {list(unique_predictions)[0]}")
             else:
-                print(f"  ⚠️ 5m ({pred_5m_t1}) 和 15m ({pred_15m_t1}) 的 t+1 预测不一致")
-                print(f"     这可能表示市场正在发生短期变化")
+                print(f"  ⚠️ 不同时间框架的 t+1 预测不一致:")
+                for tf, pred in t1_predictions.items():
+                    print(f"    {tf}: {pred}")
+                print(f"     这可能表示市场正在发生不同时间尺度的变化")
         
+    except Exception as e:
+        print(f"\n❌ 错误: {e}")
+
+
+# ============================================================================
+# 1h 时间框架专用示例
+# ============================================================================
+
+def example_17_1h_single_symbol_training():
+    """示例 17: 训练单个交易对的 1h 模型"""
+    print("\n" + "="*80)
+    print("示例 17: 训练单个交易对的 1h 模型 (BTCUSDT)")
+    print("="*80 + "\n")
+    
+    print("⚠️  注意：完整训练可能需要较长时间（15-40分钟）")
+    print("   包括：数据获取、特征工程、HMM训练、LSTM训练")
+    print("   1h 模型用于捕捉更长期的市场趋势")
+    print("   请耐心等待...\n")
+    
+    sys.stdout.flush()
+    
+    try:
+        pipeline = TrainingPipeline(TrainingConfig)
+        
+        # 完整重训 1h 模型
+        logger.info("开始训练 1h 模型...")
+        result = pipeline.full_retrain("BTCUSDT", primary_timeframe="1h")
+        
+        print(f"\n✅ 1h 模型训练完成！")
+        print(f"测试集准确率 (t+1): {result['test_accuracy']:.2%}")
+        print(f"测试集损失: {result['test_loss']:.4f}")
+        if 'val_accuracy' in result:
+            print(f"验证集准确率 (t+1): {result['val_accuracy']:.2%}")
+        
+        # 显示多步预测信息
+        _print_multistep_results(result)
+        
+        # 显示动态状态数量优化结果
+        if result.get('n_states_optimization'):
+            opt = result['n_states_optimization']
+            if opt['adjusted']:
+                print(f"\n🔄 状态数量已自动调整: {opt['original_n_states']} -> {opt['optimal_n_states']}")
+                current_names = set(result.get('regime_mapping', {}).values())
+                print(f"   保留的状态: {sorted(current_names)}")
+            else:
+                print(f"\n✓ 状态数量保持不变: {opt['optimal_n_states']}")
+        
+        print(f"最终状态数量: {result.get('final_n_states', 6)}")
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  训练被用户中断")
+        raise
+    except Exception as e:
+        print(f"\n❌ 1h 模型训练失败: {e}")
+        raise
+
+
+def example_18_1h_realtime_prediction():
+    """示例 18: 1h 实时市场状态预测（支持多步预测）"""
+    print("\n" + "="*80)
+    print("示例 18: 1h 实时市场状态预测（多步预测）")
+    print("="*80 + "\n")
+    
+    try:
+        # 创建 1h 预测器
+        predictor = RealtimeRegimePredictor("BTCUSDT", TrainingConfig, primary_timeframe="1h")
+        
+        # 获取当前市场状态（包括多步预测）
+        current = predictor.get_current_regime()
+        
+        print(f"\n{current['symbol']} 当前市场状态 (1h 时间框架):")
+        print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print(f"时间: {current['timestamp']}")
+        
+        # 显示多步预测结果
+        predictions = current.get('predictions', {})
+        if predictions:
+            print(f"\n📈 多步预测结果 (1h):")
+            print(f"  (每步代表 1 小时，t+4 = 4 小时后)")
+            print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            for horizon in ['t+1', 't+2', 't+3', 't+4']:
+                if horizon in predictions:
+                    pred = predictions[horizon]
+                    bar = "█" * int(pred['confidence'] * 30)
+                    uncertain_mark = " ⚠️" if pred.get('is_uncertain', False) else ""
+                    print(f"  {horizon}: {pred['regime_name']:20s} {pred['confidence']:6.2%} {bar}{uncertain_mark}")
+        
+        # 显示 t+1 的详细概率分布
+        print(f"\nt+1 状态概率分布详情:")
+        print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        for regime, prob in sorted(
+            current['probabilities'].items(), 
+            key=lambda x: x[1], 
+            reverse=True
+        ):
+            bar = "█" * int(prob * 50)
+            print(f"  {regime:20s} {prob:6.2%} {bar}")
+        
+        # 显示历史 regime 序列
+        historical = current.get('historical_regimes', {})
+        if historical and historical.get('sequence'):
+            print(f"\n📜 历史 Regime 序列 (过去 {historical.get('lookback_hours', 16):.1f} 小时):")
+            print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            seq = historical['sequence']
+            recent = seq[-8:] if len(seq) > 8 else seq
+            print(f"  最近 {len(recent)} 根 K 线: {' -> '.join(recent)}")
+        
+    except FileNotFoundError:
+        print("\n❌ 1h 模型文件不存在，请先运行 1h 训练（示例 17）")
+
+
+def example_19_1h_incremental_training():
+    """示例 19: 1h 增量训练"""
+    print("\n" + "="*80)
+    print("示例 19: 1h 增量训练（在现有 1h 模型基础上）")
+    print("="*80 + "\n")
+    
+    print("⚠️  注意：增量训练通常需要 2-5 分钟")
+    print("   包括：获取最新数据、特征工程、模型更新")
+    print("   请耐心等待...\n")
+    
+    sys.stdout.flush()
+    
+    try:
+        pipeline = TrainingPipeline(TrainingConfig)
+        
+        # 执行 1h 增量训练
+        logger.info("开始 1h 增量训练...")
+        result = pipeline.incremental_train("BTCUSDT", primary_timeframe="1h")
+        
+        print(f"\n✅ 1h 增量训练完成！")
+        print(f"使用样本数: {result['samples_used']}")
+        print(f"训练时间: {result['timestamp']}")
+        
+    except FileNotFoundError as e:
+        print(f"\n❌ 1h 模型文件不存在: {e}")
+        print("   请先运行 1h 完整训练（示例 17）")
+    except KeyboardInterrupt:
+        print("\n\n⚠️  训练被用户中断")
+        raise
+    except Exception as e:
+        print(f"\n❌ 1h 增量训练失败: {e}")
+        raise
+
+
+def example_20_1h_regime_history():
+    """示例 20: 查看 1h 历史市场状态变化"""
+    print("\n" + "="*80)
+    print("示例 20: 1h 历史市场状态变化")
+    print("="*80 + "\n")
+    
+    try:
+        predictor = RealtimeRegimePredictor("BTCUSDT", TrainingConfig, primary_timeframe="1h")
+        
+        # 获取最近 7 天的状态变化（1h 模型适合更长周期）
+        history = predictor.get_regime_history(lookback_hours=168)  # 7天
+        
+        print(f"\n最近 7 天的 1h 市场状态变化:")
+        print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        
+        if history.empty:
+            print("⚠️  没有足够的历史数据进行分析。")
+        else:
+            print(history.tail(20))
+            
+            # 统计各状态出现次数
+            print(f"\n状态分布:")
+            print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            regime_counts = history['regime_name'].value_counts()
+            for regime, count in regime_counts.items():
+                percentage = count / len(history) * 100
+                print(f"{regime:20s} {count:4d} 次 ({percentage:5.1f}%)")
+        
+    except FileNotFoundError:
+        print("\n❌ 1h 模型文件不存在，请先运行 1h 训练（示例 17）")
+
+
+def example_21_batch_1h_training():
+    """示例 21: 批量训练多个交易对的 1h 模型"""
+    print("\n" + "="*80)
+    print("示例 21: 批量训练多个交易对的 1h 模型")
+    print("="*80 + "\n")
+    
+    symbols = TrainingConfig.SYMBOLS
+    
+    pipeline = TrainingPipeline(TrainingConfig)
+    
+    logger.info(f"开始批量训练 {len(symbols)} 个交易对的 1h 模型...")
+    
+    results = pipeline.train_all_symbols(training_type='full', primary_timeframe="1h")
+    
+    print("\n1h 模型训练结果汇总:")
+    for symbol, result in results.items():
+        if 'error' in result:
+            print(f"{symbol}: 失败 - {result['error']}")
+        else:
+            print(f"{symbol}: 测试集准确率 {result['test_accuracy']:.2%}")
+            if result.get('n_states_optimization') and result['n_states_optimization']['adjusted']:
+                opt = result['n_states_optimization']
+                print(f"  🔄 状态数量调整: {opt['original_n_states']} -> {opt['optimal_n_states']}")
+
+
+def example_23_batch_all_timeframes_training():
+    """示例 23: 批量训练所有交易对的所有时间框架 (5m + 15m + 1h)"""
+    print("\n" + "="*80)
+    print("示例 23: 批量训练所有交易对的所有时间框架 (5m + 15m + 1h)")
+    print("="*80 + "\n")
+    
+    print("⚠️  注意：此操作将训练所有交易对的所有时间框架模型")
+    print(f"   交易对: {TrainingConfig.SYMBOLS}")
+    print(f"   时间框架: {TrainingConfig.ENABLED_MODELS}")
+    print(f"   总计: {len(TrainingConfig.SYMBOLS)} 个交易对 × {len(TrainingConfig.ENABLED_MODELS)} 个时间框架 = {len(TrainingConfig.SYMBOLS) * len(TrainingConfig.ENABLED_MODELS)} 个模型")
+    print("   预计耗时: 1-2 小时（取决于数据获取速度）")
+    print("   请耐心等待...\n")
+    
+    import sys
+    sys.stdout.flush()
+    
+    try:
+        pipeline = TrainingPipeline(TrainingConfig)
+        
+        # 训练所有交易对的所有时间框架
+        logger.info("开始批量训练所有交易对的所有时间框架...")
+        results = pipeline.train_all_multi_timeframe(training_type='full')
+        
+        print("\n" + "="*80)
+        print("训练结果汇总")
+        print("="*80)
+        
+        # 按交易对汇总
+        for symbol, symbol_results in results.items():
+            print(f"\n{symbol}:")
+            print("-" * 60)
+            for timeframe, result in symbol_results.items():
+                if 'error' in result:
+                    print(f"  {timeframe}: ❌ {result['error']}")
+                else:
+                    accuracy = result.get('test_accuracy', 0)
+                    print(f"  {timeframe}: ✅ 测试集准确率 {accuracy:.2%}")
+                    
+                    # 显示状态数量调整信息
+                    if result.get('n_states_optimization') and result['n_states_optimization']['adjusted']:
+                        opt = result['n_states_optimization']
+                        print(f"         🔄 状态数量调整: {opt['original_n_states']} -> {opt['optimal_n_states']}")
+                    
+                    # 显示状态分布警告
+                    if 'state_distribution_check' in result:
+                        dist_check = result['state_distribution_check']
+                        if not dist_check['healthy']:
+                            missing = len(dist_check['missing_states']['val'])
+                            if missing > 0:
+                                print(f"         ⚠️ 验证集缺失 {missing} 个状态")
+        
+        # 统计成功和失败
+        total_models = sum(len(symbol_results) for symbol_results in results.values())
+        successful = sum(
+            1 for symbol_results in results.values()
+            for result in symbol_results.values()
+            if 'error' not in result
+        )
+        failed = total_models - successful
+        
+        print("\n" + "="*80)
+        print("训练统计")
+        print("="*80)
+        print(f"总模型数: {total_models}")
+        print(f"成功: {successful} ✅")
+        print(f"失败: {failed} ❌")
+        print(f"成功率: {successful/total_models*100:.1f}%")
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  训练被用户中断")
+        raise
+    except Exception as e:
+        print(f"\n❌ 批量训练失败: {e}")
+        raise
+
+
+def example_22_multistep_api_1h():
+    """示例 22: 使用 API 进行 1h 多步预测"""
+    print("\n" + "="*80)
+    print("示例 22: 使用 predict_regimes() API 进行 1h 多步预测")
+    print("="*80 + "\n")
+    
+    try:
+        api = ModelAPI()
+        
+        # 使用新的 predict_regimes API
+        result = api.predict_regimes(
+            symbol="BTCUSDT",
+            primary_timeframe="1h",
+            include_history=True,
+            history_bars=24  # 24 根 1h K 线 = 24 小时/1天
+        )
+        
+        print(f"\n{result['symbol']} 多步预测结果 ({result['timeframe']}):")
+        print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print(f"时间: {result['timestamp']}")
+        
+        # 模型信息
+        model_info = result.get('model_info', {})
+        print(f"\n📊 模型信息:")
+        print(f"  序列长度: {model_info.get('sequence_length', 'N/A')}")
+        print(f"  状态数量: {model_info.get('n_states', 'N/A')}")
+        print(f"  预测步数: {model_info.get('prediction_horizons', 'N/A')}")
+        
+        # 多步预测
+        predictions = result.get('predictions', {})
+        if predictions:
+            print(f"\n📈 多步预测 (1h):")
+            print(f"  (每步代表 1 小时，t+4 = 4 小时后)")
+            print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            for horizon in ['t+1', 't+2', 't+3', 't+4']:
+                if horizon in predictions:
+                    pred = predictions[horizon]
+                    bar = "█" * int(pred['confidence'] * 30)
+                    uncertain_mark = " ⚠️" if pred.get('is_uncertain', False) else ""
+                    print(f"  {horizon}: {pred['most_likely']:20s} {pred['confidence']:6.2%} {bar}{uncertain_mark}")
+        
+        # 历史序列
+        historical = result.get('historical_regimes', {})
+        if historical and historical.get('sequence'):
+            print(f"\n📜 历史 Regime 序列 (过去 {historical.get('lookback_hours', 24):.1f} 小时):")
+            print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            seq = historical['sequence']
+            recent = seq[-8:] if len(seq) > 8 else seq
+            print(f"  最近 {len(recent)} 根 K 线: {' -> '.join(recent)}")
+            
+            # 统计
+            from collections import Counter
+            counts = Counter(seq)
+            print(f"  历史分布: {dict(counts)}")
+        
+    except FileNotFoundError:
+        print("\n❌ 1h 模型文件不存在，请先运行 1h 训练（示例 17）")
     except Exception as e:
         print(f"\n❌ 错误: {e}")
 
@@ -818,10 +1173,23 @@ def print_menu():
     print("   15. 🆕 使用 predict_regimes() API 5m 多步预测")
     
     print("\n" + "-"*40)
+    print("📈 1h 时间框架 (长期趋势)")
+    print("-"*40)
+    print("  训练相关:")
+    print("   17. 训练单个交易对 1h 模型 [多步预测]")
+    print("   21. 批量训练多个交易对 1h 模型")
+    print("   19. 1h 增量训练")
+    print("  推理相关:")
+    print("   18. 1h 实时市场状态预测 [多步预测 t+1~t+4]")
+    print("   20. 1h 历史市场状态变化")
+    print("   22. 🆕 使用 predict_regimes() API 1h 多步预测")
+    
+    print("\n" + "-"*40)
     print("🔄 多时间框架")
     print("-"*40)
-    print("   11. 多时间框架并行预测 (5m + 15m)")
-    print("   16. 🆕 对比 5m 和 15m 的多步预测")
+    print("   11. 多时间框架并行预测 (5m + 15m + 1h)")
+    print("   16. 🆕 对比多个时间框架的多步预测 (5m + 15m + 1h)")
+    print("   23. 🆕 批量训练所有交易对的所有时间框架 (5m + 15m + 1h)")
     
     print("\n" + "-"*40)
     print("其他:")
@@ -855,6 +1223,15 @@ def main():
         14: example_14_multistep_api_15m,
         15: example_15_multistep_api_5m,
         16: example_16_compare_timeframes,
+        # 1h 时间框架
+        17: example_17_1h_single_symbol_training,
+        18: example_18_1h_realtime_prediction,
+        19: example_19_1h_incremental_training,
+        20: example_20_1h_regime_history,
+        21: example_21_batch_1h_training,
+        22: example_22_multistep_api_1h,
+        # 多时间框架批量训练
+        23: example_23_batch_all_timeframes_training,
     }
     
     # 如果有命令行参数，直接运行指定示例

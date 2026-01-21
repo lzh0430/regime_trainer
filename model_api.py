@@ -792,8 +792,8 @@ def create_app(api_instance: ModelAPI = None):
         """预测下一根K线的market regime"""
         try:
             timeframe = request.args.get('timeframe', '15m')
-            if timeframe not in ['5m', '15m']:
-                return jsonify({'error': f'不支持的时间框架: {timeframe}'}), 400
+            if timeframe not in api.config.MODEL_CONFIGS.keys():
+                return jsonify({'error': f'不支持的时间框架: {timeframe}，支持的值: {list(api.config.MODEL_CONFIGS.keys())}'}), 400
             result = api.predict_next_regime(symbol, primary_timeframe=timeframe)
             return jsonify(datetime_to_str(result))
         except ValueError as e:
@@ -808,8 +808,8 @@ def create_app(api_instance: ModelAPI = None):
         try:
             timeframe = request.args.get('timeframe', '15m')
             include_history = request.args.get('include_history', 'true').lower() == 'true'
-            if timeframe not in ['5m', '15m']:
-                return jsonify({'error': f'不支持的时间框架: {timeframe}'}), 400
+            if timeframe not in api.config.MODEL_CONFIGS.keys():
+                return jsonify({'error': f'不支持的时间框架: {timeframe}，支持的值: {list(api.config.MODEL_CONFIGS.keys())}'}), 400
             result = api.predict_regimes(symbol, primary_timeframe=timeframe, include_history=include_history)
             return jsonify(datetime_to_str(result))
         except ValueError as e:
@@ -823,8 +823,8 @@ def create_app(api_instance: ModelAPI = None):
         """获取模型元数据"""
         try:
             timeframe = request.args.get('timeframe', '15m')
-            if timeframe not in ['5m', '15m']:
-                return jsonify({'error': f'不支持的时间框架: {timeframe}'}), 400
+            if timeframe not in api.config.MODEL_CONFIGS.keys():
+                return jsonify({'error': f'不支持的时间框架: {timeframe}，支持的值: {list(api.config.MODEL_CONFIGS.keys())}'}), 400
             metadata = api.get_model_metadata(symbol, primary_timeframe=timeframe)
             return jsonify(datetime_to_str(metadata))
         except ValueError as e:
@@ -839,8 +839,8 @@ def create_app(api_instance: ModelAPI = None):
         try:
             timeframe = request.args.get('timeframe')
             if timeframe:
-                if timeframe not in ['5m', '15m']:
-                    return jsonify({'error': f'不支持的时间框架: {timeframe}'}), 400
+                if timeframe not in api.config.MODEL_CONFIGS.keys():
+                    return jsonify({'error': f'不支持的时间框架: {timeframe}，支持的值: {list(api.config.MODEL_CONFIGS.keys())}'}), 400
                 models = api.list_available_models(primary_timeframe=timeframe)
             else:
                 models = api.list_available_models()
@@ -870,8 +870,8 @@ def create_app(api_instance: ModelAPI = None):
             timeframe = data.get('timeframe', '15m')
             if not isinstance(symbols, list):
                 return jsonify({'error': 'symbols 必须是列表'}), 400
-            if timeframe not in ['5m', '15m']:
-                return jsonify({'error': f'不支持的时间框架: {timeframe}'}), 400
+            if timeframe not in api.config.MODEL_CONFIGS.keys():
+                return jsonify({'error': f'不支持的时间框架: {timeframe}，支持的值: {list(api.config.MODEL_CONFIGS.keys())}'}), 400
             results = api.batch_predict(symbols, primary_timeframe=timeframe)
             return jsonify(datetime_to_str(results))
         except Exception as e:
@@ -895,8 +895,8 @@ def create_app(api_instance: ModelAPI = None):
             start_date_str = request.args.get('start_date')
             end_date_str = request.args.get('end_date')
             
-            if timeframe not in ['5m', '15m']:
-                return jsonify({'error': f'不支持的时间框架: {timeframe}'}), 400
+            if timeframe not in api.config.MODEL_CONFIGS.keys():
+                return jsonify({'error': f'不支持的时间框架: {timeframe}，支持的值: {list(api.config.MODEL_CONFIGS.keys())}'}), 400
             
             # 解析日期
             start_date = None

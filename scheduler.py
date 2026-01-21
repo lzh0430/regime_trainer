@@ -107,15 +107,47 @@ class TrainingScheduler:
         
         self._run_in_background(train)
     
+    def incremental_training_job_1h(self):
+        """1h级别模型的增量训练任务"""
+        logger.info("="*80)
+        logger.info("触发1h级别模型增量训练任务")
+        logger.info("="*80)
+        
+        def train():
+            try:
+                # 训练所有交易对的1h模型
+                results = {}
+                for symbol in self.config.SYMBOLS:
+                    try:
+                        result = self.pipeline.incremental_train(
+                            symbol=symbol, 
+                            primary_timeframe="1h"
+                        )
+                        results[symbol] = result
+                        logger.info(f"✅ {symbol} 1h 增量训练完成")
+                    except Exception as e:
+                        logger.error(f"❌ {symbol} 1h 增量训练失败: {e}", exc_info=True)
+                        results[symbol] = {'error': str(e)}
+                
+                logger.info(f"1h级别模型增量训练完成，结果: {results}")
+            except Exception as e:
+                logger.error(f"1h级别模型增量训练失败: {e}", exc_info=True)
+        
+        self._run_in_background(train)
+    
     def setup_schedule(self):
         """设置调度任务"""
-        # 15m级别模型：每隔1小时触发一次增量训练
+        # 15m级别模型：每隔3小时触发一次增量训练
         schedule.every(3).hours.do(self.incremental_training_job_15m)
         logger.info("已设置15m级别模型增量训练任务: 每隔3小时")
         
         # 5m级别模型：每隔指定时间触发一次增量训练
         schedule.every(60).minutes.do(self.incremental_training_job_5m)
         logger.info("已设置5m级别模型增量训练任务: 每隔60分钟")
+        
+        # 1h级别模型：每隔6小时触发一次增量训练（比15m频率低）
+        schedule.every(6).hours.do(self.incremental_training_job_1h)
+        logger.info("已设置1h级别模型增量训练任务: 每隔6小时")
     
     def run(self):
         """运行调度器"""

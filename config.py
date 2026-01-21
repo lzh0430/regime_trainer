@@ -14,8 +14,8 @@ class TrainingConfig:
     SYMBOLS = [
         "BTCUSDT",
         "ETHUSDT",
-        # "SOLUSDT",
-        # "BNBUSDT",
+        "SOLUSDT",
+        "BNBUSDT",
         # 添加更多交易对
     ]
     
@@ -45,10 +45,19 @@ class TrainingConfig:
             "epochs": 50,  # 15m模型使用默认epoch数
             "early_stopping_patience": 8,  # 使用默认patience
         },
+        "1h": {
+            "primary_timeframe": "1h",
+            "timeframes": ["15m", "1h", "4h"],  # 包含更高时间框架捕捉长期趋势
+            "sequence_length": 24,  # 24根1h K线 = 24小时/1天
+            "lstm_units": [64, 32],  # 与15m相同，序列长度相近
+            "dense_units": [32],
+            "epochs": 60,  # 比15m多，因为数据点更少需要更多训练
+            "early_stopping_patience": 10,  # 介于5m和15m之间
+        },
     }
     
     # 启用的模型列表
-    ENABLED_MODELS = ["5m", "15m"]  # 同时启用 5m 和 15m 模型
+    ENABLED_MODELS = ["5m", "15m", "1h"]  # 同时启用 5m、15m 和 1h 模型
     
     # 完整重训数据长度（天）
     FULL_RETRAIN_DAYS = 730  # 2年（2024-2025）- 增加数据量以改善类别不平衡
