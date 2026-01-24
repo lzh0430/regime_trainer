@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 import logging
 import time
+import requests
 from config import TrainingConfig
 from data_cache import DataCacheManager
 
@@ -30,8 +31,8 @@ class BinanceDataFetcher:
     REQUESTS_PER_MINUTE = 1200  # 每分钟最大权重
     SAFE_REQUESTS_PER_BATCH = 3  # 每批安全请求数
     DELAY_BETWEEN_BATCHES = 1.0  # 批次间延迟（秒）
-    MAX_RETRIES = 3  # 最大重试次数
-    RETRY_DELAY = 5  # 重试延迟（秒）
+    MAX_RETRIES = 5  # 最大重试次数（增加以应对网络不稳定）
+    RETRY_DELAY = 3  # 重试基础延迟（秒），实际延迟会指数增长
     
     def __init__(self, api_key: str = None, api_secret: str = None, cache_enabled: bool = True):
         """
@@ -146,6 +147,38 @@ class BinanceDataFetcher:
                     return True
                 return False
         
+        # 处理连接错误（ConnectionResetError, ConnectionError 等网络问题）
+        if isinstance(error, (requests.exceptions.ConnectionError, ConnectionResetError, ConnectionError)):
+            if retry_count < self.MAX_RETRIES:
+                # 使用指数退避策略
+                wait_time = self.RETRY_DELAY * (2 ** retry_count)
+                logger.warning(
+                    f"网络连接错误，{wait_time} 秒后重试 ({retry_count + 1}/{self.MAX_RETRIES}): "
+                    f"{type(error).__name__}"
+                )
+                self.total_delay_time += wait_time
+                time.sleep(wait_time)
+                return True
+            else:
+                logger.error(
+                    f"网络连接错误，已达最大重试次数 ({self.MAX_RETRIES}): {error}"
+                )
+                return False
+        
+        # 处理超时错误
+        if isinstance(error, (requests.exceptions.Timeout, requests.exceptions.ReadTimeout)):
+            if retry_count < self.MAX_RETRIES:
+                wait_time = self.RETRY_DELAY * (2 ** retry_count)
+                logger.warning(
+                    f"请求超时，{wait_time} 秒后重试 ({retry_count + 1}/{self.MAX_RETRIES})"
+                )
+                self.total_delay_time += wait_time
+                time.sleep(wait_time)
+                return True
+            else:
+                logger.error(f"请求超时，已达最大重试次数: {error}")
+                return False
+        
         # 其他类型的错误
         logger.error(
             f"请求失败: {error}",
@@ -243,6 +276,15 @@ class BinanceDataFetcher:
                     )
                     
                 except BinanceAPIException as e:
+                    last_exception = e
+                    should_retry = self._handle_api_error(e, retry_count)
+                    if not should_retry:
+                        raise
+                    retry_count += 1
+                
+                except (requests.exceptions.ConnectionError, ConnectionResetError, 
+                        requests.exceptions.Timeout, ConnectionError) as e:
+                    # 网络相关错误，使用统一的错误处理器（带指数退避）
                     last_exception = e
                     should_retry = self._handle_api_error(e, retry_count)
                     if not should_retry:
