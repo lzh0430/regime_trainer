@@ -145,11 +145,14 @@ class TrainingPipeline:
         sequence_length = model_config["sequence_length"]
         lstm_units = model_config.get("lstm_units", self.config.LSTM_UNITS)
         dense_units = model_config.get("dense_units", self.config.DENSE_UNITS)
+        dropout_rate = model_config.get("dropout_rate", self.config.DROPOUT_RATE)
         
         logger.info(f"="*80)
         logger.info(f"开始完整重训: {symbol} (primary_timeframe={primary_timeframe})")
         logger.info(f"  时间框架: {timeframes}")
         logger.info(f"  序列长度: {sequence_length}")
+        logger.info(f"  LSTM 单元: {lstm_units}, Dense 单元: {dense_units}")
+        logger.info(f"  Dropout: {dropout_rate}")
         logger.info(f"="*80)
         
         # 1. 获取数据
@@ -394,7 +397,7 @@ class TrainingPipeline:
             sequence_length=sequence_length,  # 使用模型配置的序列长度
             lstm_units=lstm_units,  # 使用模型配置的 LSTM 单元数
             dense_units=dense_units,  # 使用模型配置的 Dense 单元数
-            dropout_rate=self.config.DROPOUT_RATE,
+            dropout_rate=dropout_rate,
             l2_lambda=self.config.L2_LAMBDA,
             use_batch_norm=self.config.USE_BATCH_NORM,
             learning_rate=self.config.LEARNING_RATE,

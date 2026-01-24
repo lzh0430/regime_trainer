@@ -521,18 +521,29 @@ class HMMRegimeLabeler:
         """
         计算趋势强度（基于收益的方向一致性）
         
+        趋势强度 = 绝对收益均值 * 方向一致性
+        - 方向一致性：连续同向 K 线的比例，范围 [-1, 1]
+        - 结果范围：[0, +inf)，值越大表示趋势越明显
+        
         Args:
             df: DataFrame
             
         Returns:
-            趋势强度值
+            趋势强度值（已放大 1000 倍以便比较）
         """
         returns_col = self._find_feature_column(df, 'returns')
         if returns_col is not None and returns_col in df.columns:
-            returns = df[returns_col]
-            # 方向一致性：绝对收益均值 * 方向符号
+            returns = df[returns_col].dropna()
             if len(returns) > 0:
-                return abs(returns.mean()) * 1000  # 放大以便比较
+                # 计算方向一致性：sign(returns) 的均值
+                # 如果全部同向，direction_consistency = 1 或 -1
+                # 如果方向随机，direction_consistency ≈ 0
+                direction_consistency = np.sign(returns).mean()
+                
+                # 趋势强度 = 绝对收益均值 * 方向一致性的绝对值
+                # 这样，连续同向的 K 线会有更高的趋势强度
+                trend_strength = abs(returns.mean()) * abs(direction_consistency) * 1000
+                return trend_strength
         return 0.0
     
     def _calc_state_profile(self, features: pd.DataFrame, states: np.ndarray, state: int) -> Dict:
@@ -600,17 +611,19 @@ class HMMRegimeLabeler:
         profile: Dict, 
         available_names: set, 
         adx_median: float, 
-        vol_median: float
+        vol_median: float,
+        trend_median: float = 0.01
     ) -> str:
         """
         根据状态特征选择最合适的 fallback 名称
         
         不是随机选择，而是根据特征与各 regime 的典型特征进行匹配。
+        使用归一化的分数计算，确保各指标权重均衡。
         
         典型特征：
         - Strong_Trend: 高 ADX (> median), 高趋势强度
-        - Weak_Trend: 中等 ADX
-        - Range: 低 ADX, 中等波动率
+        - Weak_Trend: 中等 ADX, 有方向性
+        - Range: 低 ADX, 中等波动率, 无方向性
         - Choppy_High_Vol: 低 ADX, 高波动率
         - Volatility_Spike: 极高波动率
         - Squeeze: 极低波动率, 低 ADX
@@ -620,6 +633,7 @@ class HMMRegimeLabeler:
             available_names: 可用的 regime 名称集合
             adx_median: ADX 中位数
             vol_median: 波动率中位数
+            trend_median: 趋势强度中位数
             
         Returns:
             最合适的 regime 名称
@@ -627,6 +641,11 @@ class HMMRegimeLabeler:
         adx = profile['adx_mean']
         vol = profile['volatility_score']
         trend = profile['trend_strength']
+        
+        # 归一化值（防止除零）
+        adx_norm = adx / adx_median if adx_median > 0 else 0
+        vol_norm = vol / vol_median if vol_median > 0 else 0
+        trend_norm = trend / trend_median if trend_median > 0 else 0
         
         # 计算每个可用名称的匹配分数（越高越匹配）
         scores = {}
@@ -636,35 +655,36 @@ class HMMRegimeLabeler:
             
             if name == 'Strong_Trend':
                 # 高 ADX + 高趋势强度
-                score = (adx / adx_median) + (trend * 10)
+                score = adx_norm + trend_norm
                 
             elif name == 'Weak_Trend':
-                # 中等 ADX
-                if adx_median * 0.6 < adx < adx_median * 1.4:
-                    score = 1.0 - abs(adx - adx_median) / adx_median
-                else:
-                    score = 0.1
+                # 中等 ADX + 有方向性
+                # ADX 接近中位数得分高
+                adx_score = 1.0 - abs(adx_norm - 1.0) if 0.6 < adx_norm < 1.4 else 0.1
+                trend_score = min(trend_norm, 1.0)  # 有方向性但不需要太强
+                score = adx_score + trend_score * 0.5
                     
             elif name == 'Range':
-                # 低 ADX + 中等波动率
-                if adx < adx_median:
-                    score = (1 - adx / adx_median) * 0.5
-                    if vol_median * 0.5 < vol < vol_median * 1.5:
-                        score += 0.5
+                # 低 ADX + 中等波动率 + 无方向性
+                if adx_norm < 1.0:
+                    adx_score = 1.0 - adx_norm
+                    vol_score = 1.0 - abs(vol_norm - 1.0) if 0.5 < vol_norm < 1.5 else 0.1
+                    trend_score = 1.0 - min(trend_norm, 1.0)  # 方向性越低越好
+                    score = adx_score * 0.4 + vol_score * 0.3 + trend_score * 0.3
                         
             elif name == 'Choppy_High_Vol':
                 # 低 ADX + 高波动率
-                if adx < adx_median and vol > vol_median:
-                    score = (vol / vol_median) * (1 - adx / adx_median)
+                if adx_norm < 1.0 and vol_norm > 1.0:
+                    score = vol_norm * (1.0 - adx_norm)
                     
             elif name == 'Volatility_Spike':
                 # 极高波动率
-                score = vol / vol_median if vol_median > 0 else 0
+                score = vol_norm
                 
             elif name == 'Squeeze':
                 # 极低波动率 + 低 ADX
-                if vol < vol_median and adx < adx_median:
-                    score = (1 - vol / vol_median) * (1 - adx / adx_median)
+                if vol_norm < 1.0 and adx_norm < 1.0:
+                    score = (1.0 - vol_norm) * (1.0 - adx_norm)
             
             scores[name] = score
         
@@ -672,7 +692,8 @@ class HMMRegimeLabeler:
         best_name = max(scores, key=scores.get)
         
         logger.debug(
-            f"Fallback 名称选择: ADX={adx:.2f}, vol={vol:.4f}, "
+            f"Fallback 名称选择: ADX={adx:.2f} (norm={adx_norm:.2f}), "
+            f"vol={vol:.4f} (norm={vol_norm:.2f}), trend={trend:.4f} (norm={trend_norm:.2f}), "
             f"scores={scores}, best={best_name}"
         )
         
@@ -737,17 +758,31 @@ class HMMRegimeLabeler:
         # 计算统计量用于归一化比较（相对阈值基准）
         all_adx = [p['adx_mean'] for p in valid_profiles]
         all_vol = [p['volatility_score'] for p in valid_profiles]
+        all_trend = [p['trend_strength'] for p in valid_profiles if p['trend_strength'] > 0]
         
         adx_median = np.median(all_adx) if all_adx else 25
         vol_median = np.median(all_vol) if all_vol else 0.01
+        trend_median = np.median(all_trend) if all_trend else 0.01
         
-        logger.info(f"相对阈值基准: ADX_median={adx_median:.2f}, vol_median={vol_median:.4f}")
+        logger.info(
+            f"相对阈值基准: ADX_median={adx_median:.2f}, vol_median={vol_median:.4f}, "
+            f"trend_median={trend_median:.4f}"
+        )
         
         # 分配 regime 名称
         mapping = {}
         used_names = set()
         
-        # 按优先级分配名称
+        # ========== 按优先级分配名称 ==========
+        # 优先级说明：
+        # 1. Volatility_Spike - 最极端，波动率飙升
+        # 2. Squeeze - 次极端，波动率收缩
+        # 3. Strong_Trend - 高 ADX 特征明显
+        # 4. Choppy_High_Vol - 高波动 + 低 ADX
+        # 5. Range - 低 ADX + 中等波动 + 无方向性
+        # 6. Weak_Trend - 中等 ADX + 有方向性
+        # 7. Fallback - 真正的剩余状态
+        
         # 1. Volatility_Spike: 波动率最高的状态
         #    条件：波动率 > vol_median * 1.5 且 > min_vol_for_spike（绝对护栏）
         vol_sorted = sorted(valid_profiles, key=lambda x: x['volatility_score'], reverse=True)
@@ -769,9 +804,14 @@ class HMMRegimeLabeler:
         # 2. Squeeze: 波动率最低 + ADX 最低
         #    条件：波动率 < vol_median * 0.7 且 < max_vol_for_squeeze（绝对护栏）
         #          ADX < adx_median 且 < max_adx_for_squeeze（绝对护栏）
+        #    排序：使用归一化权重 (vol/vol_median + adx/adx_median)
         remaining = [p for p in valid_profiles if p['state'] not in mapping]
         if remaining:
-            squeeze_sorted = sorted(remaining, key=lambda x: x['volatility_score'] + x['adx_mean'] / 100)
+            # 归一化排序：低波动 + 低 ADX（值越小越好）
+            squeeze_sorted = sorted(
+                remaining, 
+                key=lambda x: (x['volatility_score'] / vol_median) + (x['adx_mean'] / adx_median)
+            )
             candidate = squeeze_sorted[0]
             
             vol_relative_ok = candidate['volatility_score'] < vol_median * 0.7
@@ -791,9 +831,15 @@ class HMMRegimeLabeler:
         
         # 3. Strong_Trend: ADX 最高 + 趋势强度高
         #    条件：ADX > adx_median * 1.2 且 > min_adx_for_strong_trend（绝对护栏）
+        #    排序：使用归一化权重 (adx/adx_median + trend/trend_median)
         remaining = [p for p in valid_profiles if p['state'] not in mapping]
         if remaining:
-            trend_sorted = sorted(remaining, key=lambda x: x['adx_mean'] + x['trend_strength'] * 10, reverse=True)
+            # 归一化排序：高 ADX + 高趋势强度（值越大越好）
+            trend_sorted = sorted(
+                remaining, 
+                key=lambda x: (x['adx_mean'] / adx_median) + (x['trend_strength'] / trend_median if trend_median > 0 else 0), 
+                reverse=True
+            )
             candidate = trend_sorted[0]
             
             relative_ok = candidate['adx_mean'] > adx_median * 1.2
@@ -802,7 +848,7 @@ class HMMRegimeLabeler:
             if relative_ok and absolute_ok:
                 mapping[candidate['state']] = 'Strong_Trend'
                 used_names.add('Strong_Trend')
-                logger.info(f"State {candidate['state']} -> Strong_Trend (ADX={candidate['adx_mean']:.2f})")
+                logger.info(f"State {candidate['state']} -> Strong_Trend (ADX={candidate['adx_mean']:.2f}, trend={candidate['trend_strength']:.4f})")
             elif relative_ok and not absolute_ok:
                 logger.info(
                     f"State {candidate['state']} 满足相对条件但不满足绝对护栏 "
@@ -810,49 +856,89 @@ class HMMRegimeLabeler:
                 )
         
         # 4. Choppy_High_Vol: 高波动 + 低 ADX（不需要绝对护栏，已由 Volatility_Spike 过滤）
+        #    排序：使用归一化权重 (vol/vol_median - adx/adx_median)
         remaining = [p for p in valid_profiles if p['state'] not in mapping]
         if remaining:
-            choppy_sorted = sorted(remaining, key=lambda x: x['volatility_score'] - x['adx_mean'] / 100, reverse=True)
+            # 归一化排序：高波动 + 低 ADX（值越大越好）
+            choppy_sorted = sorted(
+                remaining, 
+                key=lambda x: (x['volatility_score'] / vol_median) - (x['adx_mean'] / adx_median), 
+                reverse=True
+            )
             candidate = choppy_sorted[0]
             if candidate['volatility_score'] > vol_median and candidate['adx_mean'] < adx_median:
                 mapping[candidate['state']] = 'Choppy_High_Vol'
                 used_names.add('Choppy_High_Vol')
                 logger.info(f"State {candidate['state']} -> Choppy_High_Vol (volatility={candidate['volatility_score']:.4f}, ADX={candidate['adx_mean']:.2f})")
         
-        # 5. Weak_Trend: 中等 ADX
+        # 5. Range: 低 ADX + 中等波动 + 无方向性（在 Weak_Trend 之前）
+        #    条件：ADX < adx_median 且 波动率在中等范围 且 趋势强度低
+        #    排序：波动率最接近中位数的优先
         remaining = [p for p in valid_profiles if p['state'] not in mapping]
         if remaining:
-            weak_trend_sorted = sorted(remaining, key=lambda x: x['adx_mean'], reverse=True)
+            # 按波动率与中位数的距离排序（越接近越好）
+            range_sorted = sorted(
+                remaining, 
+                key=lambda x: abs(x['volatility_score'] - vol_median)
+            )
+            candidate = range_sorted[0]
+            
+            # Range 条件：低 ADX + 中等波动 + 低趋势强度（无明确方向）
+            adx_ok = candidate['adx_mean'] < adx_median
+            vol_in_range = vol_median * 0.5 < candidate['volatility_score'] < vol_median * 1.5
+            low_trend = candidate['trend_strength'] < trend_median * 0.8  # 方向性较弱
+            
+            if adx_ok and vol_in_range and low_trend:
+                mapping[candidate['state']] = 'Range'
+                used_names.add('Range')
+                logger.info(
+                    f"State {candidate['state']} -> Range (ADX={candidate['adx_mean']:.2f}, "
+                    f"vol={candidate['volatility_score']:.4f}, trend={candidate['trend_strength']:.4f})"
+                )
+        
+        # 6. Weak_Trend: 中等 ADX + 有方向性
+        #    条件：ADX > adx_median * 0.8 且 趋势强度 > trend_median * 0.5
+        #    排序：使用归一化权重 (adx/adx_median + trend/trend_median)
+        remaining = [p for p in valid_profiles if p['state'] not in mapping]
+        if remaining:
+            # 归一化排序：中等 ADX + 有方向性（值越大越好）
+            weak_trend_sorted = sorted(
+                remaining, 
+                key=lambda x: (x['adx_mean'] / adx_median) + (x['trend_strength'] / trend_median if trend_median > 0 else 0), 
+                reverse=True
+            )
             candidate = weak_trend_sorted[0]
-            if candidate['adx_mean'] > adx_median * 0.8:
+            
+            # Weak_Trend 条件：中等 ADX + 有一定方向性
+            adx_ok = candidate['adx_mean'] > adx_median * 0.8
+            has_direction = candidate['trend_strength'] > trend_median * 0.5
+            
+            if adx_ok and has_direction:
                 mapping[candidate['state']] = 'Weak_Trend'
                 used_names.add('Weak_Trend')
-                logger.info(f"State {candidate['state']} -> Weak_Trend (ADX={candidate['adx_mean']:.2f})")
+                logger.info(
+                    f"State {candidate['state']} -> Weak_Trend (ADX={candidate['adx_mean']:.2f}, "
+                    f"trend={candidate['trend_strength']:.4f})"
+                )
         
-        # 6. Range: 剩余的状态
+        # 7. Fallback: 剩余的状态，使用智能分配
         remaining = [p for p in valid_profiles if p['state'] not in mapping]
         for p in remaining:
-            if 'Range' not in used_names:
-                mapping[p['state']] = 'Range'
-                used_names.add('Range')
-                logger.info(f"State {p['state']} -> Range")
+            available_names = set(DEFAULT_REGIME_NAMES) - used_names
+            if available_names:
+                # 根据特征选择最合适的名称
+                best_name = self._select_best_fallback_name(
+                    p, available_names, adx_median, vol_median, trend_median
+                )
+                mapping[p['state']] = best_name
+                used_names.add(best_name)
+                logger.info(
+                    f"State {p['state']} -> {best_name} (fallback, "
+                    f"ADX={p['adx_mean']:.2f}, vol={p['volatility_score']:.4f}, trend={p['trend_strength']:.4f})"
+                )
             else:
-                # 如果还有剩余，根据特征选择最接近的名称（不是随机分配！）
-                available_names = set(DEFAULT_REGIME_NAMES) - used_names
-                if available_names:
-                    # 根据特征选择最合适的名称
-                    best_name = self._select_best_fallback_name(
-                        p, available_names, adx_median, vol_median
-                    )
-                    mapping[p['state']] = best_name
-                    used_names.add(best_name)
-                    logger.info(
-                        f"State {p['state']} -> {best_name} (fallback, "
-                        f"ADX={p['adx_mean']:.2f}, vol={p['volatility_score']:.4f})"
-                    )
-                else:
-                    mapping[p['state']] = f"State_{p['state']}"
-                    logger.info(f"State {p['state']} -> State_{p['state']} (no available names)")
+                mapping[p['state']] = f"State_{p['state']}"
+                logger.info(f"State {p['state']} -> State_{p['state']} (no available names)")
         
         # 确保所有状态都有映射
         for state in range(self.n_states):
@@ -860,7 +946,7 @@ class HMMRegimeLabeler:
                 mapping[state] = f"State_{state}"
         
         # 映射合理性检查：验证分配的名称是否与特征一致
-        self._validate_mapping(mapping, profiles, adx_median, vol_median)
+        self._validate_mapping(mapping, profiles, adx_median, vol_median, trend_median)
         
         # 保存映射和 profiles
         self.regime_mapping_ = mapping
@@ -874,12 +960,21 @@ class HMMRegimeLabeler:
         mapping: Dict[int, str], 
         profiles: List[Dict],
         adx_median: float,
-        vol_median: float
+        vol_median: float,
+        trend_median: float = 0.01
     ):
         """
         验证映射结果是否合理
         
         检查分配的语义名称是否与状态特征一致，不一致时记录警告。
+        
+        验证规则：
+        - Strong_Trend: 应该有较高的 ADX (> median * 0.8)
+        - Weak_Trend: 应该有中等 ADX 且有一定趋势强度
+        - Range: 应该有较低的 ADX 且低趋势强度
+        - Squeeze: 应该有较低的波动率 (< median * 1.5)
+        - Volatility_Spike: 应该有较高的波动率 (> median * 0.8)
+        - Choppy_High_Vol: 应该有较高的波动率且低 ADX
         """
         profile_dict = {p['state']: p for p in profiles}
         
@@ -895,6 +990,32 @@ class HMMRegimeLabeler:
                     f"但 ADX={p['adx_mean']:.2f} 低于中位数*0.8={adx_median*0.8:.2f}"
                 )
             
+            # Weak_Trend 应该有中等 ADX 和一定的趋势强度
+            if name == 'Weak_Trend':
+                if p['adx_mean'] > adx_median * 1.5:
+                    logger.warning(
+                        f"⚠️ 映射可能不合理: State {state} 被映射为 {name}，"
+                        f"但 ADX={p['adx_mean']:.2f} 过高（> 中位数*1.5={adx_median*1.5:.2f}）"
+                    )
+                if p['trend_strength'] < trend_median * 0.3:
+                    logger.warning(
+                        f"⚠️ 映射可能不合理: State {state} 被映射为 {name}，"
+                        f"但趋势强度={p['trend_strength']:.4f} 过低（< 中位数*0.3={trend_median*0.3:.4f}）"
+                    )
+            
+            # Range 应该有较低的 ADX 和低趋势强度
+            if name == 'Range':
+                if p['adx_mean'] > adx_median * 1.2:
+                    logger.warning(
+                        f"⚠️ 映射可能不合理: State {state} 被映射为 {name}，"
+                        f"但 ADX={p['adx_mean']:.2f} 过高（> 中位数*1.2={adx_median*1.2:.2f}）"
+                    )
+                if p['trend_strength'] > trend_median * 1.5:
+                    logger.warning(
+                        f"⚠️ 映射可能不合理: State {state} 被映射为 {name}，"
+                        f"但趋势强度={p['trend_strength']:.4f} 过高（> 中位数*1.5={trend_median*1.5:.4f}），应该无明确方向"
+                    )
+            
             # Squeeze 应该有较低的波动率
             if name == 'Squeeze' and p['volatility_score'] > vol_median * 1.5:
                 logger.warning(
@@ -908,6 +1029,19 @@ class HMMRegimeLabeler:
                     f"⚠️ 映射可能不合理: State {state} 被映射为 {name}，"
                     f"但波动率={p['volatility_score']:.4f} 低于中位数*0.8={vol_median*0.8:.4f}"
                 )
+            
+            # Choppy_High_Vol 应该有较高的波动率和较低的 ADX
+            if name == 'Choppy_High_Vol':
+                if p['volatility_score'] < vol_median * 0.8:
+                    logger.warning(
+                        f"⚠️ 映射可能不合理: State {state} 被映射为 {name}，"
+                        f"但波动率={p['volatility_score']:.4f} 过低（< 中位数*0.8={vol_median*0.8:.4f}）"
+                    )
+                if p['adx_mean'] > adx_median * 1.2:
+                    logger.warning(
+                        f"⚠️ 映射可能不合理: State {state} 被映射为 {name}，"
+                        f"但 ADX={p['adx_mean']:.2f} 过高（> 中位数*1.2={adx_median*1.2:.2f}）"
+                    )
     
     def get_regime_name(self, state_id: int) -> str:
         """

@@ -26,33 +26,41 @@ class TrainingConfig:
     # ============ 多时间框架模型配置 ============
     # 支持同时训练和使用多个主时间框架的模型
     # 每个配置定义一个独立的 regime 模型
+    #
+    # 数据量估算（730天）：
+    #   - 5m:  ~210,000 样本 → 大容量模型 + 弱正则化
+    #   - 15m: ~70,000 样本  → 中等容量模型
+    #   - 1h:  ~17,500 样本  → 小容量模型 + 强正则化（防止过拟合）
     MODEL_CONFIGS = {
         "5m": {
             "primary_timeframe": "5m",
             "timeframes": ["1m", "5m", "15m"],  # 包含 1m 用于捕捉微观结构
             "sequence_length": 48,  # 48根5m K线 = 4小时
-            "lstm_units": [96, 48],  # 增加容量以匹配更长的序列（48 vs 32）
-            "dense_units": [48],  # 相应增加 Dense 层容量
-            "epochs": 80,  # 5m模型需要更多epoch才能收敛（更大的模型容量）
-            "early_stopping_patience": 12,  # 更大的patience，给5m模型更多训练机会
+            "lstm_units": [96, 48],  # 大容量模型，匹配丰富的数据量
+            "dense_units": [48],
+            "dropout_rate": 0.2,  # 较弱正则化（数据量大，过拟合风险低）
+            "epochs": 80,  # 大模型需要更多epoch才能收敛
+            "early_stopping_patience": 12,  # 更大的patience，给大模型更多训练机会
         },
         "15m": {
             "primary_timeframe": "15m",
             "timeframes": ["5m", "15m", "1h"],
             "sequence_length": 32,  # 32根15m K线 = 8小时
-            "lstm_units": [64, 32],
+            "lstm_units": [64, 32],  # 中等容量
             "dense_units": [32],
-            "epochs": 50,  # 15m模型使用默认epoch数
-            "early_stopping_patience": 8,  # 使用默认patience
+            "dropout_rate": 0.25,  # 默认正则化强度
+            "epochs": 50,
+            "early_stopping_patience": 8,
         },
         "1h": {
             "primary_timeframe": "1h",
             "timeframes": ["15m", "1h", "4h"],  # 包含更高时间框架捕捉长期趋势
             "sequence_length": 24,  # 24根1h K线 = 24小时/1天
-            "lstm_units": [64, 32],  # 与15m相同，序列长度相近
-            "dense_units": [32],
-            "epochs": 60,  # 比15m多，因为数据点更少需要更多训练
-            "early_stopping_patience": 10,  # 介于5m和15m之间
+            "lstm_units": [48, 24],  # 小容量模型（数据量仅为15m的1/4，防止过拟合）
+            "dense_units": [24],
+            "dropout_rate": 0.35,  # 较强正则化（数据量少，过拟合风险高）
+            "epochs": 60,  # 数据点少需要更多epoch
+            "early_stopping_patience": 8,  # 较早停止以防止过拟合
         },
     }
     
@@ -141,6 +149,20 @@ class TrainingConfig:
     # - Squeeze: ADX 必须 < 相对阈值 且 < MAX_ADX_FOR_SQUEEZE
     REGIME_MIN_ADX_FOR_STRONG_TREND = 30  # ADX 至少 30 才能标记为 Strong_Trend
     REGIME_MAX_ADX_FOR_SQUEEZE = 20  # ADX 最多 20 才能标记为 Squeeze
+    
+    # 趋势强度阈值（用于区分 Weak_Trend 和 Range）
+    # - Weak_Trend: 趋势强度 > trend_median * MIN_TREND_FOR_WEAK_TREND（有方向性）
+    # - Range: 趋势强度 < trend_median * MAX_TREND_FOR_RANGE（无明确方向）
+    REGIME_MIN_TREND_FOR_WEAK_TREND = 0.5  # Weak_Trend 的最小趋势强度倍数（相对于中位数）
+    REGIME_MAX_TREND_FOR_RANGE = 0.8  # Range 的最大趋势强度倍数（无方向性）
+    
+    # Range 的波动率范围（相对于中位数）
+    # Range 要求波动率在中等范围内，不能太高（否则是 Choppy）也不能太低（否则是 Squeeze）
+    REGIME_RANGE_VOL_MIN_RATIO = 0.5  # 最小波动率 = vol_median * 0.5
+    REGIME_RANGE_VOL_MAX_RATIO = 1.5  # 最大波动率 = vol_median * 1.5
+    
+    # Choppy_High_Vol 的最小波动率倍数（相对于中位数）
+    REGIME_MIN_VOL_FOR_CHOPPY = 1.0  # 波动率 >= vol_median 才能标记为 Choppy_High_Vol
     
     # ============ LSTM 配置 ============
     SEQUENCE_LENGTH = 32  # LSTM 输入序列长度（32根15m K线 = 8小时，适合日内交易）
