@@ -131,7 +131,7 @@ class TrainingPipeline:
         
         Args:
             symbol: 交易对
-            primary_timeframe: 主时间框架（如 "5m" 或 "15m"），如果为 None 则使用默认配置
+            primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
             
         Returns:
             训练结果
@@ -512,7 +512,7 @@ class TrainingPipeline:
         
         Args:
             symbol: 交易对
-            primary_timeframe: 主时间框架（如 "5m" 或 "15m"），如果为 None 则使用默认配置
+            primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
             
         Returns:
             训练结果
@@ -697,7 +697,7 @@ class TrainingPipeline:
         
         Args:
             training_type: 'full' 或 'incremental'
-            primary_timeframe: 主时间框架（如 "5m" 或 "15m"），如果为 None 则使用默认配置
+            primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
             
         Returns:
             所有交易对的训练结果
@@ -730,7 +730,7 @@ class TrainingPipeline:
         
         Args:
             symbol: 交易对
-            timeframes: 要训练的时间框架列表（如 ["5m", "15m"]），如果为 None 则使用 ENABLED_MODELS
+            timeframes: 要训练的时间框架列表（如 ["5m", "15m", "1h"]），如果为 None 则使用 ENABLED_MODELS
             training_type: 'full' 或 'incremental'
             
         Returns:
@@ -769,7 +769,7 @@ class TrainingPipeline:
         为所有交易对训练多个时间框架的模型
         
         Args:
-            timeframes: 要训练的时间框架列表（如 ["5m", "15m"]），如果为 None 则使用 ENABLED_MODELS
+            timeframes: 要训练的时间框架列表（如 ["5m", "15m", "1h"]），如果为 None 则使用 ENABLED_MODELS
             training_type: 'full' 或 'incremental'
             
         Returns:

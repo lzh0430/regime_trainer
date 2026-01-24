@@ -57,7 +57,7 @@ class ModelAPI:
         
         Args:
             symbol: 交易对
-            primary_timeframe: 主时间框架（如 "5m" 或 "15m"），如果为 None 则使用默认配置
+            primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
             
         Returns:
             预测器实例
@@ -117,7 +117,7 @@ class ModelAPI:
         
         Args:
             symbol: 交易对（如 "BTCUSDT"）
-            primary_timeframe: 主时间框架（如 "5m", "15m"），如果为 None 则使用默认配置
+            primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
             include_history: 是否包含历史 regime 序列
             history_bars: 历史序列的 K 线数量（默认 16 根，对于 15m 约为 4 小时）
             
@@ -218,7 +218,7 @@ class ModelAPI:
         Args:
             symbol: 交易对（如 "BTCUSDT"）
             timeframe: [已废弃] 使用 primary_timeframe 代替
-            primary_timeframe: 主时间框架（如 "5m", "15m"），如果为 None 则使用默认配置
+            primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
             
         Returns:
             包含预测结果的字典（只包含 t+1 预测，向后兼容格式）
@@ -306,7 +306,7 @@ class ModelAPI:
         
         Args:
             symbol: 交易对
-            primary_timeframe: 主时间框架（如 "5m" 或 "15m"），如果为 None 则使用默认配置
+            primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
             
         Returns:
             模型元数据字典:
@@ -583,7 +583,7 @@ class ModelAPI:
             lookback_hours: 回看小时数（如果指定，则从当前时间往前回看）
             start_date: 开始日期时间（如果指定，则获取指定时间范围）
             end_date: 结束日期时间（如果指定，则获取指定时间范围）
-            primary_timeframe: 主时间框架（如 "5m", "15m"），如果为 None 则使用默认配置
+            primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
             
         Returns:
             包含历史regime序列的字典:

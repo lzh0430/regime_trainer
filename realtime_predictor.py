@@ -27,7 +27,7 @@ class RealtimeRegimePredictor:
         Args:
             symbol: 交易对
             config: 配置
-            primary_timeframe: 主时间框架（如 "5m" 或 "15m"），如果为 None 则使用默认配置
+            primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
         """
         self.symbol = symbol
         self.config = config
@@ -627,7 +627,7 @@ class MultiSymbolRegimeTracker:
         Args:
             symbols: 交易对列表
             config: 配置
-            primary_timeframe: 主时间框架（如 "5m" 或 "15m"），如果为 None 则使用默认配置
+            primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
         """
         self.symbols = symbols
         self.config = config
