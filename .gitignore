@@ -56,6 +56,7 @@ models/
 # Data files
 data/
 *.db
+data/model_registry.db
 *.sqlite
 *.sqlite3
 *.csv

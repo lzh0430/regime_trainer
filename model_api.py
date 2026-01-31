@@ -18,6 +18,7 @@ import numpy as np
 
 from config import TrainingConfig, setup_logging
 from realtime_predictor import RealtimeRegimePredictor, MultiTimeframeRegimePredictor
+from model_registry import get_prod_info, set_prod, list_versions
 
 setup_logging(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -333,11 +334,11 @@ class ModelAPI:
         predictor = self._get_predictor(symbol, primary_timeframe)
         model_info = self._get_model_info(predictor)
         
-        # 获取模型路径
+        # 获取模型路径（PROD 版本）
         model_paths = {
-            'lstm': self.config.get_model_path(symbol, 'lstm', primary_timeframe),
-            'hmm': self.config.get_hmm_path(symbol, primary_timeframe),
-            'scaler': self.config.get_scaler_path(symbol, primary_timeframe)
+            'lstm': self.config.get_prod_model_path(symbol, 'lstm', primary_timeframe),
+            'hmm': self.config.get_prod_hmm_path(symbol, primary_timeframe),
+            'scaler': self.config.get_prod_scaler_path(symbol, primary_timeframe)
         }
         
         # 获取训练信息
@@ -468,8 +469,8 @@ class ModelAPI:
         
         for symbol in self.config.SYMBOLS:
             for tf in timeframes_to_check:
-                model_path = self.config.get_model_path(symbol, 'lstm', tf)
-                scaler_path = self.config.get_scaler_path(symbol, tf)
+                model_path = self.config.get_prod_model_path(symbol, 'lstm', tf)
+                scaler_path = self.config.get_prod_scaler_path(symbol, tf)
                 
                 if os.path.exists(model_path) and os.path.exists(scaler_path):
                     available.append(symbol)
@@ -489,8 +490,8 @@ class ModelAPI:
         for tf in self.config.MODEL_CONFIGS.keys():
             result[tf] = []
             for symbol in self.config.SYMBOLS:
-                model_path = self.config.get_model_path(symbol, 'lstm', tf)
-                scaler_path = self.config.get_scaler_path(symbol, tf)
+                model_path = self.config.get_prod_model_path(symbol, 'lstm', tf)
+                scaler_path = self.config.get_prod_scaler_path(symbol, tf)
                 
                 if os.path.exists(model_path) and os.path.exists(scaler_path):
                     result[tf].append(symbol)
@@ -857,6 +858,64 @@ def create_app(api_instance: ModelAPI = None):
             return jsonify(models_by_tf)
         except Exception as e:
             logger.error(f"按时间框架列出模型失败: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/models/prod', methods=['GET'])
+    def get_prod():
+        """获取 PROD 指针：GET /api/models/prod?symbol=BTCUSDT&timeframe=15m"""
+        try:
+            symbol = request.args.get('symbol')
+            timeframe = request.args.get('timeframe', '15m')
+            if not symbol:
+                return jsonify({'error': '缺少参数 symbol'}), 400
+            if timeframe not in api.config.MODEL_CONFIGS.keys():
+                return jsonify({'error': f'不支持的时间框架: {timeframe}'}), 400
+            info = get_prod_info(symbol, timeframe, models_dir=api.config.MODELS_DIR)
+            if info is None:
+                # 无显式 PROD 指针时返回当前生效的版本（latest 或 legacy）
+                from model_registry import get_prod_version
+                version_id = get_prod_version(symbol, timeframe, models_dir=api.config.MODELS_DIR)
+                return jsonify({
+                    'symbol': symbol,
+                    'timeframe': timeframe,
+                    'version_id': version_id,
+                    'updated_at': None,
+                    'note': 'fallback (no prod_pointer row)'
+                })
+            return jsonify(info)
+        except Exception as e:
+            logger.error(f"获取 PROD 失败: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/models/prod', methods=['POST', 'PUT'])
+    def set_prod_route():
+        """设置 PROD 指针：POST /api/models/prod  body: { "symbol", "timeframe", "version_id" }"""
+        try:
+            data = request.get_json()
+            if not data or 'symbol' not in data or 'version_id' not in data:
+                return jsonify({'error': '请求体必须包含 symbol 和 version_id'}), 400
+            symbol = data['symbol']
+            timeframe = data.get('timeframe', '15m')
+            version_id = data['version_id']
+            if timeframe not in api.config.MODEL_CONFIGS.keys():
+                return jsonify({'error': f'不支持的时间框架: {timeframe}'}), 400
+            ok = set_prod(symbol, timeframe, version_id, models_dir=api.config.MODELS_DIR)
+            if not ok:
+                return jsonify({'error': f'路径不存在: models/{version_id}/{symbol}/{timeframe}/'}), 400
+            info = get_prod_info(symbol, timeframe, models_dir=api.config.MODELS_DIR)
+            return jsonify(info)
+        except Exception as e:
+            logger.error(f"设置 PROD 失败: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/models/versions', methods=['GET'])
+    def list_versions_route():
+        """列出所有版本及每个版本包含的 symbol/timeframe；标注 is_prod"""
+        try:
+            versions = list_versions(models_dir=api.config.MODELS_DIR)
+            return jsonify({'versions': versions})
+        except Exception as e:
+            logger.error(f"列出版本失败: {e}", exc_info=True)
             return jsonify({'error': str(e)}), 500
     
     @app.route('/api/batch_predict', methods=['POST'])

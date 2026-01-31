@@ -42,9 +42,9 @@ class RealtimeRegimePredictor:
         self.model_config = config.get_model_config(primary_timeframe)
         self.timeframes = self.model_config["timeframes"]
         
-        # 加载 LSTM 模型
-        model_path = config.get_model_path(symbol, "lstm", primary_timeframe)
-        scaler_path = config.get_scaler_path(symbol, primary_timeframe)
+        # 加载 LSTM 模型（使用 PROD 版本路径）
+        model_path = config.get_prod_model_path(symbol, "lstm", primary_timeframe)
+        scaler_path = config.get_prod_scaler_path(symbol, primary_timeframe)
         
         if not os.path.exists(model_path) or not os.path.exists(scaler_path):
             raise FileNotFoundError(
@@ -54,8 +54,8 @@ class RealtimeRegimePredictor:
         self.lstm_classifier = LSTMRegimeClassifier.load(model_path, scaler_path)
         logger.info(f"已加载 {symbol} 的 LSTM 模型 (primary_timeframe={primary_timeframe})")
         
-        # 加载 HMM 模型以获取状态映射
-        hmm_path = config.get_hmm_path(symbol, primary_timeframe)
+        # 加载 HMM 模型以获取状态映射（使用 PROD 版本路径）
+        hmm_path = config.get_prod_hmm_path(symbol, primary_timeframe)
         self.regime_mapping = {}  # 默认空映射
         
         if os.path.exists(hmm_path):
