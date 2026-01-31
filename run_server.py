@@ -83,6 +83,7 @@ def main():
     logger.info("  POST /api/models/prod                     - 设置 PROD 指针 (body: symbol, timeframe, version_id)")
     logger.info("  GET  /api/models/versions                 - 列出版本及 symbol/timeframe")
     logger.info("  POST /api/forward_test/trigger_all        - 触发所有待执行的 forward test")
+    logger.info("  GET  /api/forward_test/status             - 获取 forward test cron 状态")
     logger.info("  POST /api/batch_predict                   - 批量预测")
     logger.info("  GET  /api/docs                             - Swagger API 文档")
     logger.info("")

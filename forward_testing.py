@@ -422,6 +422,7 @@ class ForwardTestCronManager:
     
     def _job_wrapper(self, version_id: str, symbol: str, timeframe: str) -> None:
         """Wrapper for schedule job that runs one forward test."""
+        logger.info(f"🔄 Cron job triggered: {version_id} {symbol} {timeframe}")
         try:
             result = run_one_forward_test(
                 version_id,
@@ -433,9 +434,12 @@ class ForwardTestCronManager:
             )
             if result is None:
                 # Campaign completed or inactive - cancel the job
+                logger.info(f"Campaign completed or inactive, cancelling cron job: {version_id} {symbol} {timeframe}")
                 self.cancel_campaign_job(version_id, symbol, timeframe)
+            else:
+                logger.info(f"✅ Forward test run completed: {version_id} {symbol} {timeframe} - runs: {result.get('runs_count')}/{result.get('required_runs')}")
         except Exception as e:
-            logger.error(f"Forward test cron job failed {version_id} {symbol} {timeframe}: {e}", exc_info=True)
+            logger.error(f"❌ Forward test cron job failed {version_id} {symbol} {timeframe}: {e}", exc_info=True)
     
     def register_campaign_job(self, version_id: str, symbol: str, timeframe: str) -> bool:
         """
@@ -451,10 +455,15 @@ class ForwardTestCronManager:
             logger.warning(f"Unknown timeframe {timeframe}, cannot register cron job")
             return False
         
+        # Ensure scheduler is running before registering jobs
+        if not self._is_running:
+            logger.warning(f"Cron manager not running, starting it before registering job for {version_id} {symbol} {timeframe}")
+            self.start()
+        
         # Create schedule job: every N minutes
         job = schedule.every(mins).minutes.do(self._job_wrapper, version_id, symbol, timeframe)
         self._jobs[key] = job
-        logger.info(f"Registered cron job for {version_id} {symbol} {timeframe}: every {mins} minutes")
+        logger.info(f"✅ Registered cron job for {version_id} {symbol} {timeframe}: every {mins} minutes (total jobs: {len(self._jobs)})")
         return True
     
     def cancel_campaign_job(self, version_id: str, symbol: str, timeframe: str) -> bool:
@@ -473,9 +482,15 @@ class ForwardTestCronManager:
     def _scheduler_loop(self) -> None:
         """Background thread that runs schedule.run_pending() continuously."""
         logger.info("Forward test cron scheduler thread started")
+        tick_count = 0
         while self._is_running:
             try:
                 schedule.run_pending()
+                tick_count += 1
+                # Log every 60 ticks (1 minute) to show scheduler is alive
+                if tick_count % 60 == 0:
+                    pending_jobs = len([j for j in schedule.jobs if j.should_run])
+                    logger.debug(f"Cron scheduler alive: {len(self._jobs)} registered jobs, {pending_jobs} pending")
                 time.sleep(1)  # Check every second
             except Exception as e:
                 logger.error(f"Cron scheduler loop error: {e}", exc_info=True)
@@ -488,9 +503,9 @@ class ForwardTestCronManager:
             logger.warning("Cron manager already running")
             return
         self._is_running = True
-        self._scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
+        self._scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True, name="ForwardTestCronScheduler")
         self._scheduler_thread.start()
-        logger.info("Forward test cron manager started")
+        logger.info(f"✅ Forward test cron manager started (thread: {self._scheduler_thread.name}, is_alive: {self._scheduler_thread.is_alive()})")
     
     def stop(self) -> None:
         """Stop the background scheduler thread and cancel all jobs."""
@@ -508,7 +523,14 @@ class ForwardTestCronManager:
         Sync cron jobs with DB: register jobs for active campaigns, cancel jobs for inactive/completed.
         """
         if not os.path.isfile(self._db_path):
+            logger.info("No database file found, skipping sync")
             return
+        
+        # Ensure scheduler is running
+        if not self._is_running:
+            logger.info("Starting cron manager before syncing jobs from DB")
+            self.start()
+        
         _init_forward_test_tables(self._db_path)
         
         # Get all campaigns from DB
@@ -519,10 +541,16 @@ class ForwardTestCronManager:
             )
             db_campaigns = {tuple(row[:3]): (row[3], row[4]) for row in cur.fetchall()}
         
+        logger.info(f"Syncing cron jobs from DB: {len(db_campaigns)} campaigns found")
+        
+        registered_count = 0
+        cancelled_count = 0
+        
         # Register jobs for active campaigns that need more runs
         for (version_id, symbol, timeframe), (status, required_runs) in db_campaigns.items():
             if status != "active":
-                self.cancel_campaign_job(version_id, symbol, timeframe)
+                if self.cancel_campaign_job(version_id, symbol, timeframe):
+                    cancelled_count += 1
                 continue
             with _get_conn(self._db_path) as conn:
                 cur = conn.execute(
@@ -534,17 +562,23 @@ class ForwardTestCronManager:
                     campaign_id = row[0]
                     n = _campaign_run_count(conn, campaign_id)
                     if n < required_runs:
-                        self.register_campaign_job(version_id, symbol, timeframe)
+                        if self.register_campaign_job(version_id, symbol, timeframe):
+                            registered_count += 1
                     else:
-                        self.cancel_campaign_job(version_id, symbol, timeframe)
+                        if self.cancel_campaign_job(version_id, symbol, timeframe):
+                            cancelled_count += 1
                 else:
-                    self.cancel_campaign_job(version_id, symbol, timeframe)
+                    if self.cancel_campaign_job(version_id, symbol, timeframe):
+                        cancelled_count += 1
         
         # Cancel jobs for campaigns not in DB
         for key in list(self._jobs.keys()):
             if key not in db_campaigns:
                 version_id, symbol, timeframe = key
-                self.cancel_campaign_job(version_id, symbol, timeframe)
+                if self.cancel_campaign_job(version_id, symbol, timeframe):
+                    cancelled_count += 1
+        
+        logger.info(f"✅ Sync complete: {registered_count} registered, {cancelled_count} cancelled, {len(self._jobs)} total jobs")
     
     def trigger_all_pending(self) -> Dict[str, Any]:
         """
@@ -556,6 +590,19 @@ class ForwardTestCronManager:
             db_path=self._db_path,
             config=self.config,
         )
+    
+    def list_registered_jobs(self) -> List[Dict[str, Any]]:
+        """List all currently registered cron jobs."""
+        jobs = []
+        for (version_id, symbol, timeframe), job in self._jobs.items():
+            jobs.append({
+                "version_id": version_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "interval_minutes": self._interval_minutes.get(timeframe),
+                "next_run": str(job.next_run) if hasattr(job, 'next_run') else "unknown",
+            })
+        return jobs
 
 
 # --------------- Scheduler (legacy polling-based) ---------------

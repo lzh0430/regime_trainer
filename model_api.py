@@ -1402,6 +1402,70 @@ def create_app(api_instance: ModelAPI = None):
             logger.error(f"触发 forward test 失败: {e}", exc_info=True)
             return jsonify({'error': str(e)}), 500
     
+    @app.route('/api/forward_test/status', methods=['GET'])
+    def get_forward_test_status():
+        """
+        获取 forward test cron 状态
+        ---
+        tags:
+          - Forward Testing
+        summary: Get forward test cron manager status
+        description: Returns the status of the forward test cron manager including registered jobs
+        responses:
+          200:
+            description: Cron manager status
+            schema:
+              type: object
+              properties:
+                is_running:
+                  type: boolean
+                  description: Whether the cron scheduler is running
+                thread_alive:
+                  type: boolean
+                  description: Whether the scheduler thread is alive
+                registered_jobs:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      version_id:
+                        type: string
+                      symbol:
+                        type: string
+                      timeframe:
+                        type: string
+                      interval_minutes:
+                        type: integer
+                      next_run:
+                        type: string
+                total_jobs:
+                  type: integer
+          404:
+            description: Cron manager not initialized
+        """
+        try:
+            cron_mgr = ForwardTestCronManager._instance
+            if cron_mgr is None:
+                return jsonify({
+                    'error': 'Cron manager not initialized',
+                    'is_running': False,
+                    'registered_jobs': [],
+                    'total_jobs': 0
+                }), 404
+            
+            jobs = cron_mgr.list_registered_jobs()
+            thread_alive = cron_mgr._scheduler_thread.is_alive() if cron_mgr._scheduler_thread else False
+            
+            return jsonify({
+                'is_running': cron_mgr._is_running,
+                'thread_alive': thread_alive,
+                'registered_jobs': jobs,
+                'total_jobs': len(jobs)
+            })
+        except Exception as e:
+            logger.error(f"获取 forward test 状态失败: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
     @app.route('/api/batch_predict', methods=['POST'])
     def batch_predict():
         """
