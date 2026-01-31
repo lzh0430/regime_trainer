@@ -19,6 +19,7 @@ import numpy as np
 from config import TrainingConfig, setup_logging
 from realtime_predictor import RealtimeRegimePredictor, MultiTimeframeRegimePredictor
 from model_registry import get_prod_info, set_prod, list_versions
+from forward_testing import trigger_all_pending_forward_tests, ForwardTestCronManager
 
 setup_logging(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -809,14 +810,54 @@ def create_app(api_instance: ModelAPI = None):
     try:
         from flask import Flask, jsonify, request
         from flask_cors import CORS
+        from flasgger import Swagger
     except ImportError:
         raise ImportError(
-            "需要安装 flask 和 flask-cors 才能使用 HTTP 服务器功能:\n"
-            "pip install flask flask-cors"
+            "需要安装 flask、flask-cors 和 flasgger 才能使用 HTTP 服务器功能:\n"
+            "pip install flask flask-cors flasgger"
         )
     
     app = Flask(__name__)
     CORS(app)
+    
+    # Swagger configuration
+    swagger_config = {
+        "headers": [],
+        "specs": [
+            {
+                "endpoint": "apispec",
+                "route": "/apispec.json",
+                "rule_filter": lambda rule: True,
+                "model_filter": lambda tag: True,
+            }
+        ],
+        "static_url_path": "/flasgger_static",
+        "swagger_ui": True,
+        "specs_route": "/api/docs",
+    }
+    
+    swagger_template = {
+        "swagger": "2.0",
+        "info": {
+            "title": "Regime Trainer API",
+            "description": "API for market regime prediction using LSTM and HMM models",
+            "version": "1.0.0",
+            "contact": {
+                "name": "API Support"
+            }
+        },
+        "basePath": "/api",
+        "schemes": ["http", "https"],
+        "tags": [
+            {"name": "Health", "description": "Health check endpoints"},
+            {"name": "Prediction", "description": "Market regime prediction endpoints"},
+            {"name": "Models", "description": "Model management endpoints"},
+            {"name": "Forward Testing", "description": "Forward testing endpoints"},
+            {"name": "History", "description": "Historical data endpoints"},
+        ]
+    }
+    
+    swagger = Swagger(app, config=swagger_config, template=swagger_template)
     
     api = api_instance or ModelAPI()
     
@@ -832,7 +873,27 @@ def create_app(api_instance: ModelAPI = None):
     
     @app.route('/api/health', methods=['GET'])
     def health():
-        """健康检查端点"""
+        """
+        健康检查端点
+        ---
+        tags:
+          - Health
+        summary: Health check endpoint
+        description: Returns the health status of the API
+        responses:
+          200:
+            description: API is healthy
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  example: healthy
+                timestamp:
+                  type: string
+                  format: date-time
+                  example: "2024-01-01T12:00:00"
+        """
         return jsonify({
             'status': 'healthy',
             'timestamp': datetime.now().isoformat()
@@ -840,7 +901,55 @@ def create_app(api_instance: ModelAPI = None):
     
     @app.route('/api/predict/<symbol>', methods=['GET'])
     def predict(symbol: str):
-        """预测下一根K线的market regime"""
+        """
+        预测下一根K线的market regime
+        ---
+        tags:
+          - Prediction
+        summary: Predict next market regime
+        description: Predicts the market regime for the next K-line candle
+        parameters:
+          - name: symbol
+            in: path
+            type: string
+            required: true
+            description: Trading pair symbol (e.g., BTCUSDT)
+            example: BTCUSDT
+          - name: timeframe
+            in: query
+            type: string
+            required: false
+            default: 15m
+            enum: [5m, 15m, 1h]
+            description: Timeframe for prediction
+        responses:
+          200:
+            description: Successful prediction
+            schema:
+              type: object
+              properties:
+                symbol:
+                  type: string
+                timeframe:
+                  type: string
+                most_likely_regime:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    probability:
+                      type: number
+                all_regimes:
+                  type: array
+                  items:
+                    type: object
+          400:
+            description: Invalid timeframe
+          404:
+            description: Model not found
+          500:
+            description: Server error
+        """
         try:
             timeframe = request.args.get('timeframe', '15m')
             if timeframe not in api.config.MODEL_CONFIGS.keys():
@@ -855,7 +964,58 @@ def create_app(api_instance: ModelAPI = None):
     
     @app.route('/api/predict_regimes/<symbol>', methods=['GET'])
     def predict_regimes(symbol: str):
-        """多步预测（t+1 到 t+4）"""
+        """
+        多步预测（t+1 到 t+4）
+        ---
+        tags:
+          - Prediction
+        summary: Multi-step regime prediction
+        description: Predicts market regimes for next 4 time steps (t+1 to t+4)
+        parameters:
+          - name: symbol
+            in: path
+            type: string
+            required: true
+            description: Trading pair symbol (e.g., BTCUSDT)
+            example: BTCUSDT
+          - name: timeframe
+            in: query
+            type: string
+            required: false
+            default: 15m
+            enum: [5m, 15m, 1h]
+            description: Timeframe for prediction
+          - name: include_history
+            in: query
+            type: boolean
+            required: false
+            default: true
+            description: Whether to include historical regime sequence
+        responses:
+          200:
+            description: Successful prediction
+            schema:
+              type: object
+              properties:
+                symbol:
+                  type: string
+                timeframe:
+                  type: string
+                predictions:
+                  type: array
+                  items:
+                    type: object
+                history:
+                  type: array
+                  items:
+                    type: object
+          400:
+            description: Invalid timeframe
+          404:
+            description: Model not found
+          500:
+            description: Server error
+        """
         try:
             timeframe = request.args.get('timeframe', '15m')
             include_history = request.args.get('include_history', 'true').lower() == 'true'
@@ -871,7 +1031,48 @@ def create_app(api_instance: ModelAPI = None):
     
     @app.route('/api/metadata/<symbol>', methods=['GET'])
     def get_metadata(symbol: str):
-        """获取模型元数据"""
+        """
+        获取模型元数据
+        ---
+        tags:
+          - Models
+        summary: Get model metadata
+        description: Returns metadata for a specific model including regime mappings and configuration
+        parameters:
+          - name: symbol
+            in: path
+            type: string
+            required: true
+            description: Trading pair symbol (e.g., BTCUSDT)
+            example: BTCUSDT
+          - name: timeframe
+            in: query
+            type: string
+            required: false
+            default: 15m
+            enum: [5m, 15m, 1h]
+            description: Timeframe for the model
+        responses:
+          200:
+            description: Model metadata
+            schema:
+              type: object
+              properties:
+                symbol:
+                  type: string
+                timeframe:
+                  type: string
+                regime_mapping:
+                  type: object
+                model_config:
+                  type: object
+          400:
+            description: Invalid timeframe
+          404:
+            description: Model not found
+          500:
+            description: Server error
+        """
         try:
             timeframe = request.args.get('timeframe', '15m')
             if timeframe not in api.config.MODEL_CONFIGS.keys():
@@ -886,7 +1087,37 @@ def create_app(api_instance: ModelAPI = None):
     
     @app.route('/api/models/available', methods=['GET'])
     def list_available():
-        """列出可用模型"""
+        """
+        列出可用模型
+        ---
+        tags:
+          - Models
+        summary: List available models
+        description: Returns a list of all available models, optionally filtered by timeframe
+        parameters:
+          - name: timeframe
+            in: query
+            type: string
+            required: false
+            enum: [5m, 15m, 1h]
+            description: Optional timeframe filter
+        responses:
+          200:
+            description: List of available models
+            schema:
+              type: object
+              properties:
+                available_models:
+                  type: array
+                  items:
+                    type: string
+                count:
+                  type: integer
+          400:
+            description: Invalid timeframe
+          500:
+            description: Server error
+        """
         try:
             timeframe = request.args.get('timeframe')
             if timeframe:
@@ -902,7 +1133,25 @@ def create_app(api_instance: ModelAPI = None):
     
     @app.route('/api/models/by_timeframe', methods=['GET'])
     def list_by_timeframe():
-        """按时间框架列出模型"""
+        """
+        按时间框架列出模型
+        ---
+        tags:
+          - Models
+        summary: List models by timeframe
+        description: Returns models grouped by timeframe
+        responses:
+          200:
+            description: Models grouped by timeframe
+            schema:
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  type: string
+          500:
+            description: Server error
+        """
         try:
             models_by_tf = api.list_available_models_by_timeframe()
             return jsonify(models_by_tf)
@@ -912,7 +1161,49 @@ def create_app(api_instance: ModelAPI = None):
     
     @app.route('/api/models/prod', methods=['GET'])
     def get_prod():
-        """获取 PROD 指针：GET /api/models/prod?symbol=BTCUSDT&timeframe=15m"""
+        """
+        获取 PROD 指针
+        ---
+        tags:
+          - Models
+        summary: Get production version pointer
+        description: Returns the production version ID for a given symbol and timeframe
+        parameters:
+          - name: symbol
+            in: query
+            type: string
+            required: true
+            description: Trading pair symbol (e.g., BTCUSDT)
+            example: BTCUSDT
+          - name: timeframe
+            in: query
+            type: string
+            required: false
+            default: 15m
+            enum: [5m, 15m, 1h]
+            description: Timeframe for the model
+        responses:
+          200:
+            description: Production version information
+            schema:
+              type: object
+              properties:
+                symbol:
+                  type: string
+                timeframe:
+                  type: string
+                version_id:
+                  type: string
+                updated_at:
+                  type: string
+                  format: date-time
+                note:
+                  type: string
+          400:
+            description: Missing symbol or invalid timeframe
+          500:
+            description: Server error
+        """
         try:
             symbol = request.args.get('symbol')
             timeframe = request.args.get('timeframe', '15m')
@@ -939,7 +1230,56 @@ def create_app(api_instance: ModelAPI = None):
     
     @app.route('/api/models/prod', methods=['POST', 'PUT'])
     def set_prod_route():
-        """设置 PROD 指针：POST /api/models/prod  body: { "symbol", "timeframe", "version_id" }"""
+        """
+        设置 PROD 指针
+        ---
+        tags:
+          - Models
+        summary: Set production version pointer
+        description: Sets the production version ID for a given symbol and timeframe
+        parameters:
+          - name: body
+            in: body
+            required: true
+            schema:
+              type: object
+              required:
+                - symbol
+                - version_id
+              properties:
+                symbol:
+                  type: string
+                  description: Trading pair symbol (e.g., BTCUSDT)
+                  example: BTCUSDT
+                timeframe:
+                  type: string
+                  description: Timeframe for the model
+                  default: 15m
+                  enum: [5m, 15m, 1h]
+                version_id:
+                  type: string
+                  description: Version ID to set as production
+                  example: "2024-01-01-1"
+        responses:
+          200:
+            description: Production version information after update
+            schema:
+              type: object
+              properties:
+                symbol:
+                  type: string
+                timeframe:
+                  type: string
+                version_id:
+                  type: string
+                updated_at:
+                  type: string
+                  format: date-time
+          400:
+            description: Missing required fields or invalid timeframe or path not found
+          500:
+            description: Server error
+        """
         try:
             data = request.get_json()
             if not data or 'symbol' not in data or 'version_id' not in data:
@@ -960,7 +1300,43 @@ def create_app(api_instance: ModelAPI = None):
     
     @app.route('/api/models/versions', methods=['GET'])
     def list_versions_route():
-        """列出所有版本及每个版本包含的 symbol/timeframe；标注 is_prod"""
+        """
+        列出所有版本及每个版本包含的 symbol/timeframe；标注 is_prod
+        ---
+        tags:
+          - Models
+        summary: List all model versions
+        description: Returns all registered model versions with their contents (symbols/timeframes) and production status
+        responses:
+          200:
+            description: List of all versions
+            schema:
+              type: object
+              properties:
+                versions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      version_id:
+                        type: string
+                      created_at:
+                        type: string
+                        format: date-time
+                      contents:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            symbol:
+                              type: string
+                            timeframe:
+                              type: string
+                            is_prod:
+                              type: boolean
+          500:
+            description: Server error
+        """
         try:
             versions = list_versions(models_dir=api.config.MODELS_DIR)
             return jsonify({'versions': versions})
@@ -968,9 +1344,105 @@ def create_app(api_instance: ModelAPI = None):
             logger.error(f"列出版本失败: {e}", exc_info=True)
             return jsonify({'error': str(e)}), 500
     
+    @app.route('/api/forward_test/trigger_all', methods=['POST'])
+    def trigger_all_forward_tests():
+        """
+        触发所有待执行的 forward test（手动触发所有 pending campaigns）
+        ---
+        tags:
+          - Forward Testing
+        summary: Trigger all pending forward tests
+        description: Manually triggers forward tests for all pending campaigns (active campaigns that still need runs)
+        responses:
+          200:
+            description: Forward test execution summary
+            schema:
+              type: object
+              properties:
+                total_campaigns:
+                  type: integer
+                  description: Total number of pending campaigns
+                successful_runs:
+                  type: integer
+                  description: Number of successful test runs
+                failed_runs:
+                  type: integer
+                  description: Number of failed runs
+                skipped_runs:
+                  type: integer
+                  description: Number of skipped runs
+                results:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      campaign_id:
+                        type: integer
+                      version_id:
+                        type: string
+                      symbol:
+                        type: string
+                      timeframe:
+                        type: string
+                      status:
+                        type: string
+                        enum: [success, skipped, error]
+          500:
+            description: Server error
+        """
+        try:
+            # Try to use cron manager if available, otherwise use default
+            cron_mgr = ForwardTestCronManager._instance
+            if cron_mgr is not None:
+                summary = cron_mgr.trigger_all_pending()
+            else:
+                summary = trigger_all_pending_forward_tests(config=api.config)
+            return jsonify(datetime_to_str(summary))
+        except Exception as e:
+            logger.error(f"触发 forward test 失败: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
     @app.route('/api/batch_predict', methods=['POST'])
     def batch_predict():
-        """批量预测"""
+        """
+        批量预测
+        ---
+        tags:
+          - Prediction
+        summary: Batch prediction for multiple symbols
+        description: Predicts market regimes for multiple symbols in a single request
+        parameters:
+          - name: body
+            in: body
+            required: true
+            schema:
+              type: object
+              required:
+                - symbols
+              properties:
+                symbols:
+                  type: array
+                  items:
+                    type: string
+                  description: List of trading pair symbols
+                  example: ["BTCUSDT", "ETHUSDT"]
+                timeframe:
+                  type: string
+                  description: Timeframe for prediction
+                  default: 15m
+                  enum: [5m, 15m, 1h]
+        responses:
+          200:
+            description: Batch prediction results
+            schema:
+              type: object
+              additionalProperties:
+                type: object
+          400:
+            description: Missing symbols or invalid timeframe
+          500:
+            description: Server error
+        """
         try:
             data = request.get_json()
             if not data or 'symbols' not in data:
@@ -991,12 +1463,76 @@ def create_app(api_instance: ModelAPI = None):
     def get_history(symbol: str):
         """
         获取历史上的market regime序列
-        
-        支持两种查询方式：
-        1. 按回看小时数：?timeframe=15m&lookback_hours=24
-        2. 按日期范围：?timeframe=15m&start_date=2024-01-01&end_date=2024-01-31
-        
-        日期格式：ISO 8601 (YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS)
+        ---
+        tags:
+          - History
+        summary: Get historical regime sequence
+        description: |
+          Returns historical market regime sequence for a symbol.
+          
+          Supports two query modes:
+          1. By lookback hours: ?timeframe=15m&lookback_hours=24
+          2. By date range: ?timeframe=15m&start_date=2024-01-01&end_date=2024-01-31
+          
+          Date format: ISO 8601 (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        parameters:
+          - name: symbol
+            in: path
+            type: string
+            required: true
+            description: Trading pair symbol (e.g., BTCUSDT)
+            example: BTCUSDT
+          - name: timeframe
+            in: query
+            type: string
+            required: false
+            default: 15m
+            enum: [5m, 15m, 1h]
+            description: Timeframe for historical data
+          - name: lookback_hours
+            in: query
+            type: integer
+            required: false
+            description: Number of hours to look back (alternative to date range)
+            example: 24
+          - name: start_date
+            in: query
+            type: string
+            required: false
+            description: Start date in ISO 8601 format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+            example: "2024-01-01"
+          - name: end_date
+            in: query
+            type: string
+            required: false
+            description: End date in ISO 8601 format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+            example: "2024-01-31"
+        responses:
+          200:
+            description: Historical regime sequence
+            schema:
+              type: object
+              properties:
+                symbol:
+                  type: string
+                timeframe:
+                  type: string
+                history:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      timestamp:
+                        type: string
+                        format: date-time
+                      regime:
+                        type: string
+          400:
+            description: Invalid timeframe or date format
+          404:
+            description: Model not found
+          500:
+            description: Server error
         """
         try:
             timeframe = request.args.get('timeframe', '15m')

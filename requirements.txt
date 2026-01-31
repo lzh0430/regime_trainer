@@ -20,6 +20,7 @@ schedule==1.2.0
 # Web API
 flask>=3.0.0
 flask-cors>=4.0.0
+flasgger>=0.9.7
 
 # 工具
 python-dotenv==1.0.0

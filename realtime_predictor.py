@@ -58,7 +58,7 @@ class RealtimeRegimePredictor:
             )
         
         self.lstm_classifier = LSTMRegimeClassifier.load(model_path, scaler_path)
-        logger.info(f"已加载 {symbol} 的 LSTM 模型 (primary_timeframe={primary_timeframe}" + (f", version_id={version_id})" if version_id else ")")
+        logger.info(f"已加载 {symbol} 的 LSTM 模型 (primary_timeframe={primary_timeframe}" + (f", version_id={version_id})" if version_id else ")"))
         
         # 加载 HMM 模型以获取状态映射
         if version_id:
