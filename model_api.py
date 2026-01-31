@@ -50,6 +50,7 @@ class ModelAPI:
         """
         self.config = config or TrainingConfig
         self._predictors = {}  # 缓存预测器，避免重复加载模型 {(symbol, timeframe): predictor}
+        self._predictors_by_version = {}  # {(symbol, timeframe, version_id): predictor}
         self._multi_tf_predictors = {}  # 缓存多时间框架预测器 {symbol: predictor}
     
     def _get_predictor(self, symbol: str, primary_timeframe: str = None) -> RealtimeRegimePredictor:
@@ -78,6 +79,21 @@ class ModelAPI:
                 raise ValueError(f"模型文件不存在，请先训练 {symbol} 的 {primary_timeframe} 模型")
         
         return self._predictors[cache_key]
+    
+    def _get_predictor_for_version(self, symbol: str, primary_timeframe: str, version_id: str) -> RealtimeRegimePredictor:
+        """获取指定版本的预测器（用于 forward testing），缓存键 (symbol, timeframe, version_id)。"""
+        if primary_timeframe is None:
+            primary_timeframe = self.config.PRIMARY_TIMEFRAME
+        cache_key = (symbol, primary_timeframe, version_id)
+        if cache_key not in self._predictors_by_version:
+            try:
+                self._predictors_by_version[cache_key] = RealtimeRegimePredictor(
+                    symbol, self.config, primary_timeframe, version_id=version_id
+                )
+            except FileNotFoundError as e:
+                logger.error(f"无法加载 {symbol} ({primary_timeframe}) 版本 {version_id} 的模型: {e}")
+                raise ValueError(f"模型文件不存在: {symbol} {primary_timeframe} version {version_id}")
+        return self._predictors_by_version[cache_key]
     
     def _get_multi_tf_predictor(self, symbol: str, timeframes: list = None) -> MultiTimeframeRegimePredictor:
         """
@@ -272,6 +288,40 @@ class ModelAPI:
         )
         
         return result
+    
+    def predict_next_regime_for_version(
+        self,
+        symbol: str,
+        primary_timeframe: str,
+        version_id: str
+    ) -> Dict:
+        """
+        使用指定版本模型预测下一根K线的 regime（用于 forward testing）。
+        返回格式与 predict_next_regime 相同。
+        """
+        predictor = self._get_predictor_for_version(symbol, primary_timeframe, version_id)
+        tf = primary_timeframe
+        current_regime = predictor.get_current_regime()
+        regime_probs = current_regime['probabilities']
+        most_likely_id = current_regime['regime_id']
+        most_likely_name = current_regime['regime_name']
+        most_likely_prob = current_regime['confidence']
+        model_info = self._get_model_info(predictor)
+        model_info['sequence_length'] = predictor.lstm_classifier.sequence_length
+        return {
+            'symbol': symbol,
+            'timeframe': tf,
+            'timestamp': datetime.now(),
+            'regime_probabilities': regime_probs,
+            'most_likely_regime': {
+                'id': int(most_likely_id),
+                'name': most_likely_name,
+                'probability': float(most_likely_prob)
+            },
+            'confidence': float(current_regime['confidence']),
+            'is_uncertain': current_regime.get('is_uncertain', False),
+            'model_info': model_info
+        }
     
     # 保持向后兼容（已废弃，建议使用 predict_next_regime）
     def predict_future_regimes(

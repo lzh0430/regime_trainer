@@ -20,6 +20,7 @@ from feature_engineering import FeatureEngineer
 from hmm_trainer import HMMRegimeLabeler
 from lstm_trainer import LSTMRegimeClassifier
 from model_registry import allocate_version_id, register_version
+from forward_testing import on_training_finished as forward_test_on_training_finished
 
 setup_logging(log_file='training.log', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -490,6 +491,10 @@ class TrainingPipeline:
         lstm_classifier.save(model_path, scaler_path)
         
         register_version(version_id, db_path=os.path.join(self.config.DATA_DIR, "model_registry.db"))
+        try:
+            forward_test_on_training_finished(symbol, primary_timeframe, version_id, self.config)
+        except Exception as e:
+            logger.warning(f"Forward test enrollment failed (training result unchanged): {e}")
         logger.info(f"完整重训完成: {symbol} (primary_timeframe={primary_timeframe}) version_id={version_id}")
         logger.info(f"测试集准确率: {eval_results['accuracy']:.4f}")
         
@@ -708,6 +713,10 @@ class TrainingPipeline:
         lstm_classifier.save(model_path, scaler_path)
         
         register_version(version_id, db_path=os.path.join(self.config.DATA_DIR, "model_registry.db"))
+        try:
+            forward_test_on_training_finished(symbol, primary_timeframe, version_id, self.config)
+        except Exception as e:
+            logger.warning(f"Forward test enrollment failed (training result unchanged): {e}")
         logger.info(f"增量训练完成: {symbol} (primary_timeframe={primary_timeframe}) version_id={version_id}")
         
         return {

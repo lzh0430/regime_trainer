@@ -24,6 +24,7 @@ import sys
 from config import TrainingConfig, setup_logging
 from model_api import ModelAPI, create_app
 from scheduler import TrainingScheduler
+from forward_testing import ForwardTestScheduler
 
 # 配置日志
 setup_logging(log_file='server.log', level=logging.INFO)
@@ -44,6 +45,12 @@ def main():
     scheduler_thread = threading.Thread(target=scheduler.run, daemon=True)
     scheduler_thread.start()
     logger.info("✅ 训练调度器已启动（后台运行）")
+    
+    # 启动 forward test 调度器（后台线程，按 5m/15m/1h 触发）
+    forward_scheduler = ForwardTestScheduler(TrainingConfig)
+    forward_thread = threading.Thread(target=forward_scheduler.run, kwargs={"tick_seconds": 60}, daemon=True)
+    forward_thread.start()
+    logger.info("✅ Forward test 调度器已启动（后台运行）")
     
     # 创建 Flask 应用
     try:
@@ -80,6 +87,7 @@ def main():
     logger.info("训练调度:")
     logger.info(f"  ✅ 15m 模型: 每 {getattr(TrainingConfig, 'INCREMENTAL_TRAIN_INTERVAL_15M', 3)} 小时增量训练")
     logger.info(f"  ✅ 5m 模型: 每 {getattr(TrainingConfig, 'INCREMENTAL_TRAIN_INTERVAL_5M', 60)} 分钟增量训练")
+    logger.info("Forward test: 5m/15m/1h 按时间框架触发，每 campaign 5 次后 qualified")
     logger.info("")
     logger.info("按 Ctrl+C 停止服务器")
     logger.info("="*80)
@@ -91,6 +99,8 @@ def main():
         logger.info("\n正在关闭服务器...")
         if scheduler:
             scheduler.stop()
+        if forward_scheduler:
+            forward_scheduler.stop()
         logger.info("服务器已停止")
 
 

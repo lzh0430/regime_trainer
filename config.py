@@ -246,6 +246,10 @@ class TrainingConfig:
     CACHE_ENABLED = True
     CACHE_COMPRESSION = True  # 是否压缩存储
     
+    # ============ Forward testing 配置 ============
+    FORWARD_TEST_INTERVAL_MINUTES = {"5m": 5, "15m": 15, "1h": 60}
+    FORWARD_TEST_REQUIRED_RUNS = 5
+    
     @classmethod
     def get_model_path(cls, symbol: str, model_type: str = "lstm", primary_timeframe: str = None) -> str:
         """
