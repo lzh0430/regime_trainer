@@ -5,7 +5,7 @@
     python run_server.py
 
 这将自动：
-1. 启动 HTTP API 服务器（端口 5858）
+1. 启动 HTTP API 服务器（端口 5000）
 2. 在后台启动训练调度器（自动执行增量训练）
 
 API 端点:
@@ -62,7 +62,7 @@ def main():
     
     # 配置服务器
     host = '0.0.0.0'
-    port = 5858
+    port = 5000
     
     # 显示启动信息
     logger.info("="*80)

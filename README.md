@@ -4,7 +4,7 @@
 
 ## 🚀 快速使用指南
 
-### 方式1：一键启动服务器（推荐）
+### 方式1：启动 Flask API 服务器（推荐）
 
 **同时运行 API 服务器和自动训练调度器**
 
@@ -21,20 +21,39 @@ python run_server.py
 **API 端点示例：**
 ```bash
 # 健康检查
-curl http://localhost:5858/api/health
+curl http://localhost:5000/api/health
 
 # 预测下一根K线
-curl http://localhost:5858/api/predict/BTCUSDT?timeframe=15m
+curl http://localhost:5000/api/predict/BTCUSDT?timeframe=15m
 
 # 多步预测（推荐）
-curl http://localhost:5858/api/predict_regimes/BTCUSDT?timeframe=15m
+curl http://localhost:5000/api/predict_regimes/BTCUSDT?timeframe=15m
 
 # 获取历史regime序列（新增）
-curl "http://localhost:5858/api/history/BTCUSDT?timeframe=15m&lookback_hours=24"
-curl "http://localhost:5858/api/history/BTCUSDT?timeframe=15m&start_date=2024-01-01&end_date=2024-01-31"
+curl "http://localhost:5000/api/history/BTCUSDT?timeframe=15m&lookback_hours=24"
+curl "http://localhost:5000/api/history/BTCUSDT?timeframe=15m&start_date=2024-01-01&end_date=2024-01-31"
 ```
 
-### 方式2：仅运行训练调度器
+### 方式2：启动 React UI（可选）
+
+**启动 React UI 前端界面**
+
+在另一个终端窗口中运行：
+
+```bash
+cd ui
+npm install  # 首次运行需要安装依赖
+npm run dev
+```
+
+这将启动 React UI 开发服务器（端口 3000）
+
+**访问地址：**
+- React UI: http://localhost:3000
+- Flask API: http://localhost:5000
+- API Docs: http://localhost:5000/api/docs
+
+### 方式3：仅运行训练调度器
 
 **只启动自动增量训练，不提供 HTTP API**
 
@@ -47,7 +66,7 @@ python scheduler.py
 - ✅ 15m 模型：每 3 小时训练一次
 - ✅ 5m 模型：每 60 分钟训练一次
 
-### 方式3：作为 Python 库使用
+### 方式4：作为 Python 库使用
 
 **在其他 Python 程序中直接调用**
 
@@ -67,7 +86,7 @@ result = api.predict_regimes("BTCUSDT", primary_timeframe="15m")
 print(result['predictions']['t+1']['most_likely'])
 ```
 
-### 方式4：运行 HTTP 服务器（通过 model_api.py）
+### 方式5：运行 HTTP 服务器（通过 model_api.py）
 
 **使用 model_api.py 启动 HTTP 服务器和调度器**
 

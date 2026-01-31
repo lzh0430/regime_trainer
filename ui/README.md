@@ -16,7 +16,7 @@ A modern React-based user interface for the Regime Trainer API.
 ### Prerequisites
 
 - Node.js 18+ and npm/yarn/pnpm
-- Flask API server running on `http://localhost:5858`
+- Flask API server running on `http://localhost:5000`
 
 ### Installation
 
@@ -51,7 +51,7 @@ npm run preview
 
 ## Configuration
 
-The UI connects to the Flask API by default at `http://localhost:5858`. To change this, set the `VITE_API_URL` environment variable:
+The UI connects to the Flask API by default at `http://localhost:5000`. To change this, set the `VITE_API_URL` environment variable:
 
 ```bash
 VITE_API_URL=http://your-api-url:port/api npm run dev
