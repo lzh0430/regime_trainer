@@ -10,7 +10,7 @@
 import logging
 import os
 from datetime import datetime
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import pandas as pd
 import numpy as np
 
@@ -19,6 +19,12 @@ from data_fetcher import BinanceDataFetcher
 from feature_engineering import FeatureEngineer
 from hmm_trainer import HMMRegimeLabeler
 from lstm_trainer import LSTMRegimeClassifier
+from model_registry import allocate_version_id, register_version
+from forward_testing import on_training_finished as forward_test_on_training_finished, ForwardTestCronManager
+from config_registry import (
+    get_config_or_default, config_dict_to_object, link_model_to_config,
+    get_default_config
+)
 
 setup_logging(log_file='training.log', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,11 +32,130 @@ logger = logging.getLogger(__name__)
 class TrainingPipeline:
     """训练管道"""
     
-    def __init__(self, config: TrainingConfig):
-        self.config = config
+    def __init__(self, config: TrainingConfig = None, config_version_id: Optional[str] = None):
+        """
+        Initialize training pipeline.
+        
+        Args:
+            config: TrainingConfig object (optional, for backward compatibility)
+            config_version_id: Config version ID from database (optional)
+        
+        If config_version_id is provided, loads config from database.
+        If config is provided, uses it directly.
+        If neither provided, uses TrainingConfig defaults.
+        """
+        if config_version_id is not None:
+            # Load config from database
+            config_dict = get_config_or_default(config_version_id)
+            config_obj = config_dict_to_object(config_dict)
+            # Copy attributes to make it work like TrainingConfig
+            self.config = type('Config', (), {})()
+            for attr_name in dir(config_obj):
+                if not attr_name.startswith('_'):
+                    setattr(self.config, attr_name, getattr(config_obj, attr_name))
+            # Ensure required attributes exist
+            if not hasattr(self.config, 'BINANCE_API_KEY'):
+                self.config.BINANCE_API_KEY = getattr(TrainingConfig, 'BINANCE_API_KEY', '')
+            if not hasattr(self.config, 'BINANCE_API_SECRET'):
+                self.config.BINANCE_API_SECRET = getattr(TrainingConfig, 'BINANCE_API_SECRET', '')
+            if not hasattr(self.config, 'MODELS_DIR'):
+                self.config.MODELS_DIR = TrainingConfig.MODELS_DIR
+            if not hasattr(self.config, 'DATA_DIR'):
+                self.config.DATA_DIR = TrainingConfig.DATA_DIR
+            if not hasattr(self.config, 'PRIMARY_TIMEFRAME'):
+                self.config.PRIMARY_TIMEFRAME = getattr(TrainingConfig, 'PRIMARY_TIMEFRAME', '15m')
+            # Copy class methods from TrainingConfig, but use instance attributes
+            def get_version_dir(version_id: str) -> str:
+                return os.path.join(self.config.MODELS_DIR, version_id)
+            
+            def get_model_path_for_version(version_id: str, symbol: str, model_type: str = "lstm", primary_timeframe: str = None) -> str:
+                tf = primary_timeframe or self.config.PRIMARY_TIMEFRAME
+                ext = "h5" if model_type == "lstm" else "pkl"
+                fname = f"{model_type}_model.{ext}"
+                return os.path.join(self.config.MODELS_DIR, version_id, symbol, tf, fname)
+            
+            def get_scaler_path_for_version(version_id: str, symbol: str, primary_timeframe: str = None) -> str:
+                tf = primary_timeframe or self.config.PRIMARY_TIMEFRAME
+                return os.path.join(self.config.MODELS_DIR, version_id, symbol, tf, "scaler.pkl")
+            
+            def get_hmm_path_for_version(version_id: str, symbol: str, primary_timeframe: str = None) -> str:
+                tf = primary_timeframe or self.config.PRIMARY_TIMEFRAME
+                return os.path.join(self.config.MODELS_DIR, version_id, symbol, tf, "hmm_model.pkl")
+            
+            def get_prod_model_path(symbol: str, model_type: str = "lstm", primary_timeframe: str = None) -> str:
+                from model_registry import get_prod_version
+                tf = primary_timeframe or self.config.PRIMARY_TIMEFRAME
+                version_id = get_prod_version(symbol, tf, models_dir=self.config.MODELS_DIR)
+                if version_id:
+                    return get_model_path_for_version(version_id, symbol, model_type, tf)
+                return get_model_path(symbol, model_type, tf)
+            
+            def get_prod_scaler_path(symbol: str, primary_timeframe: str = None) -> str:
+                from model_registry import get_prod_version
+                tf = primary_timeframe or self.config.PRIMARY_TIMEFRAME
+                version_id = get_prod_version(symbol, tf, models_dir=self.config.MODELS_DIR)
+                if version_id:
+                    return get_scaler_path_for_version(version_id, symbol, tf)
+                return get_scaler_path(symbol, tf)
+            
+            def get_prod_hmm_path(symbol: str, primary_timeframe: str = None) -> str:
+                from model_registry import get_prod_version
+                tf = primary_timeframe or self.config.PRIMARY_TIMEFRAME
+                version_id = get_prod_version(symbol, tf, models_dir=self.config.MODELS_DIR)
+                if version_id:
+                    return get_hmm_path_for_version(version_id, symbol, tf)
+                return get_hmm_path(symbol, tf)
+            
+            def get_model_path(symbol: str, model_type: str = "lstm", primary_timeframe: str = None) -> str:
+                tf = primary_timeframe or self.config.PRIMARY_TIMEFRAME
+                ext = "h5" if model_type == "lstm" else "pkl"
+                fname = f"{model_type}_model.{ext}"
+                return os.path.join(self.config.MODELS_DIR, symbol, tf, fname)
+            
+            def get_scaler_path(symbol: str, primary_timeframe: str = None) -> str:
+                tf = primary_timeframe or self.config.PRIMARY_TIMEFRAME
+                return os.path.join(self.config.MODELS_DIR, symbol, tf, "scaler.pkl")
+            
+            def get_hmm_path(symbol: str, primary_timeframe: str = None) -> str:
+                tf = primary_timeframe or self.config.PRIMARY_TIMEFRAME
+                return os.path.join(self.config.MODELS_DIR, symbol, tf, "hmm_model.pkl")
+            
+            def get_model_config(primary_timeframe: str) -> dict:
+                if not hasattr(self.config, 'MODEL_CONFIGS') or primary_timeframe not in self.config.MODEL_CONFIGS:
+                    # Fallback to TrainingConfig if not in instance
+                    return TrainingConfig.get_model_config(primary_timeframe)
+                return self.config.MODEL_CONFIGS[primary_timeframe]
+            
+            def ensure_dirs():
+                for directory in [self.config.DATA_DIR, self.config.MODELS_DIR, getattr(self.config, 'LOGS_DIR', TrainingConfig.LOGS_DIR)]:
+                    os.makedirs(directory, exist_ok=True)
+            
+            # Bind methods to config object
+            self.config.get_version_dir = get_version_dir
+            self.config.get_model_path_for_version = get_model_path_for_version
+            self.config.get_scaler_path_for_version = get_scaler_path_for_version
+            self.config.get_hmm_path_for_version = get_hmm_path_for_version
+            self.config.get_prod_model_path = get_prod_model_path
+            self.config.get_prod_scaler_path = get_prod_scaler_path
+            self.config.get_prod_hmm_path = get_prod_hmm_path
+            self.config.get_model_path = get_model_path
+            self.config.get_scaler_path = get_scaler_path
+            self.config.get_hmm_path = get_hmm_path
+            self.config.get_model_config = get_model_config
+            self.config.ensure_dirs = ensure_dirs
+            self.config_version_id = config_version_id
+        elif config is not None:
+            # Use provided config (backward compatible)
+            self.config = config
+            self.config_version_id = None
+        else:
+            # Use defaults
+            self.config = TrainingConfig
+            self.config_version_id = None
+        
         self.data_fetcher = BinanceDataFetcher(
-            api_key=config.BINANCE_API_KEY,
-            api_secret=config.BINANCE_API_SECRET
+            api_key=self.config.BINANCE_API_KEY,
+            api_secret=self.config.BINANCE_API_SECRET
         )
         self.feature_engineer = FeatureEngineer(cache_manager=self.data_fetcher.cache_manager)
     
@@ -120,7 +245,7 @@ class TrainingPipeline:
         
         logger.info("=" * 70)
     
-    def full_retrain(self, symbol: str, primary_timeframe: str = None) -> Dict:
+    def full_retrain(self, symbol: str, primary_timeframe: str = None, version_id: str = None) -> Dict:
         """
         完整重训（从零开始）
         
@@ -132,6 +257,7 @@ class TrainingPipeline:
         Args:
             symbol: 交易对
             primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
+            version_id: 版本目录 id（如 2025-01-31-1）；若为 None 则自动分配
             
         Returns:
             训练结果
@@ -139,6 +265,13 @@ class TrainingPipeline:
         # 获取模型配置
         if primary_timeframe is None:
             primary_timeframe = self.config.PRIMARY_TIMEFRAME
+        
+        if version_id is None:
+            version_id = allocate_version_id(models_dir=self.config.MODELS_DIR)
+        # 确保版本目录存在：models/{version_id}/{symbol}/{timeframe}/
+        version_dir = self.config.get_version_dir(version_id)
+        symbol_tf_dir = os.path.join(version_dir, symbol, primary_timeframe)
+        os.makedirs(symbol_tf_dir, exist_ok=True)
         
         model_config = self.config.get_model_config(primary_timeframe)
         timeframes = model_config["timeframes"]
@@ -207,16 +340,19 @@ class TrainingPipeline:
         # 4. HMM 标注（只在训练集上拟合，避免数据泄漏）
         logger.info("步骤 4/6: HMM 状态标注（只在训练集上拟合）...")
         
-        # 加载旧模型的映射（用于比对）
-        hmm_path = self.config.get_hmm_path(symbol, primary_timeframe)
+        # 加载旧模型的映射（用于比对）- 使用 PROD 路径
+        old_hmm_path = self.config.get_prod_hmm_path(symbol, primary_timeframe)
         old_mapping = None
-        if os.path.exists(hmm_path):
+        if os.path.exists(old_hmm_path):
             try:
-                old_hmm = HMMRegimeLabeler.load(hmm_path)
+                old_hmm = HMMRegimeLabeler.load(old_hmm_path)
                 old_mapping = old_hmm.get_regime_mapping()
                 logger.info(f"已加载旧模型映射用于比对: {old_mapping}")
             except Exception as e:
                 logger.warning(f"无法加载旧模型: {e}")
+        
+        # 保存路径使用版本目录
+        hmm_path = self.config.get_hmm_path_for_version(version_id, symbol, primary_timeframe)
         
         hmm_labeler = HMMRegimeLabeler(
             n_states=n_states,
@@ -446,7 +582,7 @@ class TrainingPipeline:
         
         # 6. 训练 LSTM
         logger.info("步骤 6/6: 训练 LSTM 多步预测模型...")
-        model_path = self.config.get_model_path(symbol, "lstm", primary_timeframe)
+        model_path = self.config.get_model_path_for_version(version_id, symbol, "lstm", primary_timeframe)
         
         # 使用多步训练方法
         history = lstm_classifier.train_multistep(
@@ -503,15 +639,37 @@ class TrainingPipeline:
         logger.info(f"验证集 t+1 准确率: {val_acc:.4f}")
         
         # 保存模型和标准化器
-        scaler_path = self.config.get_scaler_path(symbol, primary_timeframe)
+        scaler_path = self.config.get_scaler_path_for_version(version_id, symbol, primary_timeframe)
         lstm_classifier.save(model_path, scaler_path)
         
-        logger.info(f"完整重训完成: {symbol} (primary_timeframe={primary_timeframe})")
+        register_version(version_id, db_path=os.path.join(self.config.DATA_DIR, "model_registry.db"))
+        
+        # Link model to config version if config_version_id was used
+        if hasattr(self, 'config_version_id') and self.config_version_id:
+            try:
+                link_model_to_config(
+                    version_id,
+                    self.config_version_id,
+                    symbol,
+                    primary_timeframe,
+                    db_path=os.path.join(self.config.DATA_DIR, "model_registry.db")
+                )
+                logger.info(f"Linked model {version_id} to config {self.config_version_id}")
+            except Exception as e:
+                logger.warning(f"Failed to link model to config (training result unchanged): {e}")
+        
+        try:
+            cron_mgr = ForwardTestCronManager._instance
+            forward_test_on_training_finished(symbol, primary_timeframe, version_id, self.config, cron_manager=cron_mgr)
+        except Exception as e:
+            logger.warning(f"Forward test enrollment failed (training result unchanged): {e}")
+        logger.info(f"完整重训完成: {symbol} (primary_timeframe={primary_timeframe}) version_id={version_id}")
         logger.info(f"测试集准确率: {eval_results['accuracy']:.4f}")
         
         return {
             'symbol': symbol,
             'primary_timeframe': primary_timeframe,  # 主时间框架
+            'version_id': version_id,
             'training_type': 'full_retrain',
             'timestamp': datetime.now(),
             'test_accuracy': eval_results['accuracy'],
@@ -538,13 +696,14 @@ class TrainingPipeline:
             }
         }
     
-    def incremental_train(self, symbol: str, primary_timeframe: str = None) -> Dict:
+    def incremental_train(self, symbol: str, primary_timeframe: str = None, version_id: str = None) -> Dict:
         """
         增量训练（在现有模型基础上）
         
         Args:
             symbol: 交易对
             primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
+            version_id: 版本目录 id；若为 None 则自动分配
             
         Returns:
             训练结果
@@ -553,11 +712,17 @@ class TrainingPipeline:
         if primary_timeframe is None:
             primary_timeframe = self.config.PRIMARY_TIMEFRAME
         
+        if version_id is None:
+            version_id = allocate_version_id(models_dir=self.config.MODELS_DIR)
+        # 确保版本目录存在
+        symbol_tf_dir = os.path.join(self.config.get_version_dir(version_id), symbol, primary_timeframe)
+        os.makedirs(symbol_tf_dir, exist_ok=True)
+        
         model_config = self.config.get_model_config(primary_timeframe)
         timeframes = model_config["timeframes"]
         
         logger.info(f"="*80)
-        logger.info(f"开始增量训练: {symbol} (primary_timeframe={primary_timeframe})")
+        logger.info(f"开始增量训练: {symbol} (primary_timeframe={primary_timeframe}) version_id={version_id}")
         logger.info(f"="*80)
         
         # 1. 获取最新数据
@@ -580,15 +745,15 @@ class TrainingPipeline:
             symbol=symbol
         )
         
-        # 3. 加载 HMM 模型并标注
+        # 3. 加载 HMM 模型并标注（从 PROD 路径加载）
         logger.info("步骤 3/4: HMM 状态标注...")
-        hmm_path = self.config.get_hmm_path(symbol, primary_timeframe)
+        hmm_path_load = self.config.get_prod_hmm_path(symbol, primary_timeframe)
         
-        if not os.path.exists(hmm_path):
-            logger.warning(f"HMM 模型不存在，将执行完整重训: {hmm_path}")
-            return self.full_retrain(symbol, primary_timeframe)
+        if not os.path.exists(hmm_path_load):
+            logger.warning(f"HMM 模型不存在，将执行完整重训: {hmm_path_load}")
+            return self.full_retrain(symbol, primary_timeframe, version_id=version_id)
         
-        hmm_labeler = HMMRegimeLabeler.load(hmm_path)
+        hmm_labeler = HMMRegimeLabeler.load(hmm_path_load)
         
         # 应用特征选择（与完整训练保持一致）
         features_before_selection = features.copy()
@@ -628,16 +793,16 @@ class TrainingPipeline:
         
         states = hmm_labeler.predict(features)
         
-        # 4. 加载 LSTM 模型并增量训练
+        # 4. 加载 LSTM 模型并增量训练（从 PROD 路径加载）
         logger.info("步骤 4/4: LSTM 增量训练...")
-        model_path = self.config.get_model_path(symbol, "lstm", primary_timeframe)
-        scaler_path = self.config.get_scaler_path(symbol, primary_timeframe)
+        model_path_load = self.config.get_prod_model_path(symbol, "lstm", primary_timeframe)
+        scaler_path_load = self.config.get_prod_scaler_path(symbol, primary_timeframe)
         
-        if not os.path.exists(model_path):
-            logger.warning(f"LSTM 模型不存在，将执行完整重训: {model_path}")
-            return self.full_retrain(symbol, primary_timeframe)
+        if not os.path.exists(model_path_load):
+            logger.warning(f"LSTM 模型不存在，将执行完整重训: {model_path_load}")
+            return self.full_retrain(symbol, primary_timeframe, version_id=version_id)
         
-        lstm_classifier = LSTMRegimeClassifier.load(model_path, scaler_path)
+        lstm_classifier = LSTMRegimeClassifier.load(model_path_load, scaler_path_load)
         
         # 对齐特征（确保与训练时一致）
         # 优先使用保存的特征名称，如果没有则使用 scaler 的 feature_names_in_
@@ -710,14 +875,38 @@ class TrainingPipeline:
             use_class_weight=self.config.USE_CLASS_WEIGHT
         )
         
-        # 保存更新后的模型
+        # 保存更新后的模型到版本目录
+        model_path = self.config.get_model_path_for_version(version_id, symbol, "lstm", primary_timeframe)
+        scaler_path = self.config.get_scaler_path_for_version(version_id, symbol, primary_timeframe)
         lstm_classifier.save(model_path, scaler_path)
         
-        logger.info(f"增量训练完成: {symbol} (primary_timeframe={primary_timeframe})")
+        register_version(version_id, db_path=os.path.join(self.config.DATA_DIR, "model_registry.db"))
+        
+        # Link model to config version if config_version_id was used
+        if hasattr(self, 'config_version_id') and self.config_version_id:
+            try:
+                link_model_to_config(
+                    version_id,
+                    self.config_version_id,
+                    symbol,
+                    primary_timeframe,
+                    db_path=os.path.join(self.config.DATA_DIR, "model_registry.db")
+                )
+                logger.info(f"Linked model {version_id} to config {self.config_version_id}")
+            except Exception as e:
+                logger.warning(f"Failed to link model to config (training result unchanged): {e}")
+        
+        try:
+            cron_mgr = ForwardTestCronManager._instance
+            forward_test_on_training_finished(symbol, primary_timeframe, version_id, self.config, cron_manager=cron_mgr)
+        except Exception as e:
+            logger.warning(f"Forward test enrollment failed (training result unchanged): {e}")
+        logger.info(f"增量训练完成: {symbol} (primary_timeframe={primary_timeframe}) version_id={version_id}")
         
         return {
             'symbol': symbol,
             'primary_timeframe': primary_timeframe,
+            'version_id': version_id,
             'training_type': 'incremental',
             'timestamp': datetime.now(),
             'samples_used': len(X)
@@ -725,7 +914,7 @@ class TrainingPipeline:
     
     def train_all_symbols(self, training_type: str = 'full', primary_timeframe: str = None) -> Dict:
         """
-        训练所有交易对
+        训练所有交易对（一个 version_id 对应本次调用的所有 symbol）
         
         Args:
             training_type: 'full' 或 'incremental'
@@ -734,14 +923,15 @@ class TrainingPipeline:
         Returns:
             所有交易对的训练结果
         """
+        version_id = allocate_version_id(models_dir=self.config.MODELS_DIR)
         results = {}
         
         for symbol in self.config.SYMBOLS:
             try:
                 if training_type == 'full':
-                    result = self.full_retrain(symbol, primary_timeframe)
+                    result = self.full_retrain(symbol, primary_timeframe, version_id=version_id)
                 else:
-                    result = self.incremental_train(symbol, primary_timeframe)
+                    result = self.incremental_train(symbol, primary_timeframe, version_id=version_id)
                 
                 results[symbol] = result
                 
@@ -755,15 +945,17 @@ class TrainingPipeline:
         self, 
         symbol: str, 
         timeframes: list = None, 
-        training_type: str = 'full'
+        training_type: str = 'full',
+        version_id: str = None
     ) -> Dict:
         """
-        为单个交易对训练多个时间框架的模型
+        为单个交易对训练多个时间框架的模型（一个 version_id 对应本次调用的所有 timeframe）
         
         Args:
             symbol: 交易对
             timeframes: 要训练的时间框架列表（如 ["5m", "15m", "1h"]），如果为 None 则使用 ENABLED_MODELS
             training_type: 'full' 或 'incremental'
+            version_id: 版本目录 id；若为 None 则自动分配
             
         Returns:
             各时间框架的训练结果
@@ -771,18 +963,21 @@ class TrainingPipeline:
         if timeframes is None:
             timeframes = self.config.ENABLED_MODELS
         
+        if version_id is None:
+            version_id = allocate_version_id(models_dir=self.config.MODELS_DIR)
+        
         results = {}
         
         for tf in timeframes:
             logger.info(f"\n{'='*80}")
-            logger.info(f"训练 {symbol} 的 {tf} 模型...")
+            logger.info(f"训练 {symbol} 的 {tf} 模型... (version_id={version_id})")
             logger.info(f"{'='*80}\n")
             
             try:
                 if training_type == 'full':
-                    result = self.full_retrain(symbol, primary_timeframe=tf)
+                    result = self.full_retrain(symbol, primary_timeframe=tf, version_id=version_id)
                 else:
-                    result = self.incremental_train(symbol, primary_timeframe=tf)
+                    result = self.incremental_train(symbol, primary_timeframe=tf, version_id=version_id)
                 
                 results[tf] = result
                 
@@ -798,7 +993,7 @@ class TrainingPipeline:
         training_type: str = 'full'
     ) -> Dict:
         """
-        为所有交易对训练多个时间框架的模型
+        为所有交易对训练多个时间框架的模型（一个 version_id 对应本次调用的全部 symbol×timeframe）
         
         Args:
             timeframes: 要训练的时间框架列表（如 ["5m", "15m", "1h"]），如果为 None 则使用 ENABLED_MODELS
@@ -810,15 +1005,16 @@ class TrainingPipeline:
         if timeframes is None:
             timeframes = self.config.ENABLED_MODELS
         
+        version_id = allocate_version_id(models_dir=self.config.MODELS_DIR)
         results = {}
         
         for symbol in self.config.SYMBOLS:
             logger.info(f"\n{'#'*80}")
-            logger.info(f"开始训练 {symbol} 的所有时间框架模型: {timeframes}")
+            logger.info(f"开始训练 {symbol} 的所有时间框架模型: {timeframes} (version_id={version_id})")
             logger.info(f"{'#'*80}\n")
             
             results[symbol] = self.train_multi_timeframe_models(
-                symbol, timeframes, training_type
+                symbol, timeframes, training_type, version_id=version_id
             )
         
         return results

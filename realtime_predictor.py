@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class RealtimeRegimePredictor:
     """实时市场状态预测器"""
     
-    def __init__(self, symbol: str, config: TrainingConfig, primary_timeframe: str = None):
+    def __init__(self, symbol: str, config: TrainingConfig, primary_timeframe: str = None, version_id: str = None):
         """
         初始化
         
@@ -28,9 +28,11 @@ class RealtimeRegimePredictor:
             symbol: 交易对
             config: 配置
             primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"），如果为 None 则使用默认配置
+            version_id: 可选；指定时加载该版本的模型路径，否则使用 PROD 路径
         """
         self.symbol = symbol
         self.config = config
+        self.version_id = version_id
         self.data_fetcher = BinanceDataFetcher()
         self.feature_engineer = FeatureEngineer(cache_manager=self.data_fetcher.cache_manager)
         
@@ -42,9 +44,13 @@ class RealtimeRegimePredictor:
         self.model_config = config.get_model_config(primary_timeframe)
         self.timeframes = self.model_config["timeframes"]
         
-        # 加载 LSTM 模型
-        model_path = config.get_model_path(symbol, "lstm", primary_timeframe)
-        scaler_path = config.get_scaler_path(symbol, primary_timeframe)
+        # 加载 LSTM 模型（version_id 指定时用版本路径，否则 PROD）
+        if version_id:
+            model_path = config.get_model_path_for_version(version_id, symbol, "lstm", primary_timeframe)
+            scaler_path = config.get_scaler_path_for_version(version_id, symbol, primary_timeframe)
+        else:
+            model_path = config.get_prod_model_path(symbol, "lstm", primary_timeframe)
+            scaler_path = config.get_prod_scaler_path(symbol, primary_timeframe)
         
         if not os.path.exists(model_path) or not os.path.exists(scaler_path):
             raise FileNotFoundError(
@@ -52,10 +58,13 @@ class RealtimeRegimePredictor:
             )
         
         self.lstm_classifier = LSTMRegimeClassifier.load(model_path, scaler_path)
-        logger.info(f"已加载 {symbol} 的 LSTM 模型 (primary_timeframe={primary_timeframe})")
+        logger.info(f"已加载 {symbol} 的 LSTM 模型 (primary_timeframe={primary_timeframe}" + (f", version_id={version_id})" if version_id else ")"))
         
         # 加载 HMM 模型以获取状态映射
-        hmm_path = config.get_hmm_path(symbol, primary_timeframe)
+        if version_id:
+            hmm_path = config.get_hmm_path_for_version(version_id, symbol, primary_timeframe)
+        else:
+            hmm_path = config.get_prod_hmm_path(symbol, primary_timeframe)
         self.regime_mapping = {}  # 默认空映射
         
         if os.path.exists(hmm_path):

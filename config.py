@@ -291,6 +291,10 @@ class TrainingConfig:
     CACHE_ENABLED = True
     CACHE_COMPRESSION = True  # 是否压缩存储
     
+    # ============ Forward testing 配置 ============
+    FORWARD_TEST_INTERVAL_MINUTES = {"5m": 5, "15m": 15, "1h": 60}
+    FORWARD_TEST_REQUIRED_RUNS = 5
+    
     @classmethod
     def get_model_path(cls, symbol: str, model_type: str = "lstm", primary_timeframe: str = None) -> str:
         """
@@ -355,6 +359,67 @@ class TrainingConfig:
             if os.path.exists(new_path):
                 return new_path
             return old_path
+    
+    # --------------- Versioned model paths and PROD resolution ---------------
+    
+    @classmethod
+    def get_version_dir(cls, version_id: str) -> str:
+        """Return models/{version_id}/."""
+        return os.path.join(cls.MODELS_DIR, version_id)
+    
+    @classmethod
+    def get_model_path_for_version(
+        cls, version_id: str, symbol: str, model_type: str = "lstm", primary_timeframe: str = None
+    ) -> str:
+        """Return path under versioned layout: models/{version_id}/{symbol}/{timeframe}/{model_type}_model.h5 (or .pkl for hmm)."""
+        tf = primary_timeframe or cls.PRIMARY_TIMEFRAME
+        ext = "h5" if model_type == "lstm" else "pkl"
+        fname = f"{model_type}_model.{ext}"
+        return os.path.join(cls.MODELS_DIR, version_id, symbol, tf, fname)
+    
+    @classmethod
+    def get_scaler_path_for_version(cls, version_id: str, symbol: str, primary_timeframe: str = None) -> str:
+        """Return models/{version_id}/{symbol}/{timeframe}/scaler.pkl."""
+        tf = primary_timeframe or cls.PRIMARY_TIMEFRAME
+        return os.path.join(cls.MODELS_DIR, version_id, symbol, tf, "scaler.pkl")
+    
+    @classmethod
+    def get_hmm_path_for_version(cls, version_id: str, symbol: str, primary_timeframe: str = None) -> str:
+        """Return models/{version_id}/{symbol}/{timeframe}/hmm_model.pkl."""
+        tf = primary_timeframe or cls.PRIMARY_TIMEFRAME
+        return os.path.join(cls.MODELS_DIR, version_id, symbol, tf, "hmm_model.pkl")
+    
+    @classmethod
+    def get_prod_model_path(cls, symbol: str, model_type: str = "lstm", primary_timeframe: str = None) -> str:
+        """
+        Resolve PROD path for model: registry prod_pointer or latest version; fallback to legacy flat path.
+        """
+        from model_registry import get_prod_version
+        tf = primary_timeframe or cls.PRIMARY_TIMEFRAME
+        version_id = get_prod_version(symbol, tf, models_dir=cls.MODELS_DIR)
+        if version_id:
+            return cls.get_model_path_for_version(version_id, symbol, model_type, tf)
+        return cls.get_model_path(symbol, model_type, tf)
+    
+    @classmethod
+    def get_prod_scaler_path(cls, symbol: str, primary_timeframe: str = None) -> str:
+        """Resolve PROD path for scaler; fallback to legacy."""
+        from model_registry import get_prod_version
+        tf = primary_timeframe or cls.PRIMARY_TIMEFRAME
+        version_id = get_prod_version(symbol, tf, models_dir=cls.MODELS_DIR)
+        if version_id:
+            return cls.get_scaler_path_for_version(version_id, symbol, tf)
+        return cls.get_scaler_path(symbol, tf)
+    
+    @classmethod
+    def get_prod_hmm_path(cls, symbol: str, primary_timeframe: str = None) -> str:
+        """Resolve PROD path for HMM; fallback to legacy."""
+        from model_registry import get_prod_version
+        tf = primary_timeframe or cls.PRIMARY_TIMEFRAME
+        version_id = get_prod_version(symbol, tf, models_dir=cls.MODELS_DIR)
+        if version_id:
+            return cls.get_hmm_path_for_version(version_id, symbol, tf)
+        return cls.get_hmm_path(symbol, tf)
     
     @classmethod
     def get_model_config(cls, primary_timeframe: str) -> dict:
