@@ -27,20 +27,26 @@ class TrainingConfig:
     # 支持同时训练和使用多个主时间框架的模型
     # 每个配置定义一个独立的 regime 模型
     #
-    # 数据量估算（730天）：
-    #   - 5m:  ~210,000 样本 → 大容量模型 + 弱正则化
-    #   - 15m: ~70,000 样本  → 中等容量模型
-    #   - 1h:  ~17,500 样本  → 小容量模型 + 强正则化（防止过拟合）
+    # 数据量估算（使用 FULL_RETRAIN_DAYS_BY_TIMEFRAME）：
+    #   - 5m:  250天  × 288根/天 = ~72,000 样本 → 6状态模型
+    #   - 15m: 730天  × 96根/天  = ~70,000 样本 → 6状态模型
+    #   - 1h:  750天 × 24根/天  = ~52,560 样本 → 4状态模型（6年数据覆盖完整牛熊周期）
+    #
+    # n_states 配置说明：
+    #   - 5m/15m: 6状态（数据量大，可捕捉更细粒度的市场状态）
+    #   - 1h: 4状态（宏观视角，状态更稳定，减少验证集缺失问题）
     MODEL_CONFIGS = {
         "5m": {
             "primary_timeframe": "5m",
             "timeframes": ["1m", "5m", "15m"],  # 包含 1m 用于捕捉微观结构
             "sequence_length": 48,  # 48根5m K线 = 4小时
-            "lstm_units": [96, 48],  # 大容量模型，匹配丰富的数据量
-            "dense_units": [48],
-            "dropout_rate": 0.2,  # 较弱正则化（数据量大，过拟合风险低）
-            "epochs": 80,  # 大模型需要更多epoch才能收敛
-            "early_stopping_patience": 12,  # 更大的patience，给大模型更多训练机会
+            "lstm_units": [64, 32],  # 中等容量（数据量减少后调整）
+            "dense_units": [32],
+            "dropout_rate": 0.25,  # 标准正则化
+            "epochs": 60,
+            "early_stopping_patience": 10,
+            "n_states": 6,  # 6个市场状态
+            "n_pca_components": 5,  # PCA 降维后的特征数
         },
         "15m": {
             "primary_timeframe": "15m",
@@ -51,24 +57,63 @@ class TrainingConfig:
             "dropout_rate": 0.25,  # 默认正则化强度
             "epochs": 50,
             "early_stopping_patience": 8,
+            "n_states": 6,  # 6个市场状态
+            "n_pca_components": 5,  # PCA 降维后的特征数
         },
         "1h": {
+            # ============ 1h 级别特殊配置说明 ============
+            # 聚焦 2023年至今的市场特征：
+            #   - 2023: 底部盘整、ETF预期
+            #   - 2024-26: ETF获批、机构入场、更成熟的市场结构
+            #
+            # 不使用2022年及之前的数据，原因：
+            #   - Luna/FTX崩盘等极端事件的模式不会重复
+            #   - 散户主导→机构主导的市场结构已发生根本变化
+            #   - 旧数据的"噪声"会干扰模型学习当前市场规律
+            #
+            # 1h 级别使用 3 状态模型（更简化）：
+            #   - Trend（趋势）, Range（区间）, High_Vol（高波动）
+            #   - 数据量较少时，更少的状态有助于稳定学习
             "primary_timeframe": "1h",
             "timeframes": ["15m", "1h", "4h"],  # 包含更高时间框架捕捉长期趋势
             "sequence_length": 24,  # 24根1h K线 = 24小时/1天
-            "lstm_units": [48, 24],  # 小容量模型（数据量仅为15m的1/4，防止过拟合）
-            "dense_units": [24],
-            "dropout_rate": 0.35,  # 较强正则化（数据量少，过拟合风险高）
-            "epochs": 60,  # 数据点少需要更多epoch
-            "early_stopping_patience": 8,  # 较早停止以防止过拟合
+            "lstm_units": [32, 16],  # 更小容量（配合较少数据量）
+            "dense_units": [16],
+            "dropout_rate": 0.35,  # 较强正则化（防止在少量数据上过拟合）
+            "epochs": 40,
+            "early_stopping_patience": 8,
+            "n_states": 3,  # 3个市场状态（简化，稳定）
+            "n_states_min": 3,  # 最小3状态
+            "n_states_max": 4,  # 最大4状态
+            "n_pca_components": 3,  # PCA 组件数（配合3状态）
+            "val_ratio": 0.25,  # 验证集比例
         },
     }
     
     # 启用的模型列表
     ENABLED_MODELS = ["5m", "15m", "1h"]  # 同时启用 5m、15m 和 1h 模型
     
-    # 完整重训数据长度（天）
-    FULL_RETRAIN_DAYS = 730  # 2年（2024-2025）- 增加数据量以改善类别不平衡
+    # ============ 数据获取天数配置 ============
+    # 为不同时间框架配置不同的数据获取天数，使样本量保持平衡
+    # 目标：各时间框架有相近的样本量（~50,000-70,000）
+    #
+    # 计算公式：样本数 = 天数 × 24 × (60/间隔分钟数)
+    #   - 5m:  250天  × 288根/天 = ~72,000 样本
+    #   - 15m: 730天  × 96根/天  = ~70,000 样本
+    #   - 1h:  750天 × 24根/天  = ~52,560 样本（6年，覆盖完整牛熊周期）
+    #
+    # 1h 特别说明：
+    #   - 获取6年数据（2020-2026）覆盖完整的牛熊周期
+    #   - 包含：2021牛市、2022熊市、2023底部盘整、2024-26复苏
+    #   - 确保各类市场状态都有足够样本
+    FULL_RETRAIN_DAYS_BY_TIMEFRAME = {
+        "5m": 250,    # ~72,000 样本（减少，避免过多数据导致训练时间过长）
+        "15m": 730,   # ~70,000 样本（保持不变，作为基准）
+        "1h": 750,   # ~52,560 样本（3年）
+    }
+    
+    # 默认完整重训数据长度（向后兼容，用于未在上述字典中指定的时间框架）
+    FULL_RETRAIN_DAYS = 730
     
     # 增量训练数据长度（天）
     INCREMENTAL_TRAIN_DAYS = 30  # 最近30天
@@ -325,6 +370,22 @@ class TrainingConfig:
         if primary_timeframe not in cls.MODEL_CONFIGS:
             raise ValueError(f"不支持的时间框架: {primary_timeframe}，支持的值: {list(cls.MODEL_CONFIGS.keys())}")
         return cls.MODEL_CONFIGS[primary_timeframe]
+    
+    @classmethod
+    def get_retrain_days(cls, primary_timeframe: str) -> int:
+        """
+        获取指定时间框架的完整重训数据天数
+        
+        Args:
+            primary_timeframe: 主时间框架（如 "5m", "15m" 或 "1h"）
+            
+        Returns:
+            数据获取天数
+        """
+        return cls.FULL_RETRAIN_DAYS_BY_TIMEFRAME.get(
+            primary_timeframe, 
+            cls.FULL_RETRAIN_DAYS
+        )
     
     @classmethod
     def ensure_dirs(cls):

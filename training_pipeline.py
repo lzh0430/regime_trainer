@@ -147,12 +147,26 @@ class TrainingPipeline:
         dense_units = model_config.get("dense_units", self.config.DENSE_UNITS)
         dropout_rate = model_config.get("dropout_rate", self.config.DROPOUT_RATE)
         
+        # 获取时间框架特定的数据天数
+        retrain_days = self.config.get_retrain_days(primary_timeframe)
+        
+        # 获取时间框架特定的 HMM 参数
+        n_states = model_config.get("n_states", self.config.N_STATES)
+        n_pca_components = model_config.get("n_pca_components", self.config.N_PCA_COMPONENTS)
+        
+        # 获取时间框架特定的数据划分比例
+        val_ratio = model_config.get("val_ratio", self.config.VAL_RATIO)
+        train_ratio = 1.0 - val_ratio - self.config.TEST_RATIO
+        
         logger.info(f"="*80)
         logger.info(f"开始完整重训: {symbol} (primary_timeframe={primary_timeframe})")
         logger.info(f"  时间框架: {timeframes}")
+        logger.info(f"  数据天数: {retrain_days} 天")
         logger.info(f"  序列长度: {sequence_length}")
         logger.info(f"  LSTM 单元: {lstm_units}, Dense 单元: {dense_units}")
         logger.info(f"  Dropout: {dropout_rate}")
+        logger.info(f"  HMM 状态数: {n_states}, PCA 组件数: {n_pca_components}")
+        logger.info(f"  数据划分: train={train_ratio:.0%}, val={val_ratio:.0%}, test={self.config.TEST_RATIO:.0%}")
         logger.info(f"="*80)
         
         # 1. 获取数据
@@ -160,7 +174,7 @@ class TrainingPipeline:
         data = self.data_fetcher.fetch_full_training_data(
             symbol=symbol,
             timeframes=timeframes,
-            days=self.config.FULL_RETRAIN_DAYS
+            days=retrain_days
         )
         # 注意：数据已自动保存到 SQLite 缓存中，无需额外保存
         
@@ -185,8 +199,8 @@ class TrainingPipeline:
         logger.info("步骤 3/6: 按时间划分数据...")
         train_features, val_features, test_features = self._split_data_by_time(
             features,
-            train_ratio=self.config.TRAIN_RATIO,
-            val_ratio=self.config.VAL_RATIO,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
             test_ratio=self.config.TEST_RATIO
         )
         
@@ -205,8 +219,8 @@ class TrainingPipeline:
                 logger.warning(f"无法加载旧模型: {e}")
         
         hmm_labeler = HMMRegimeLabeler(
-            n_states=self.config.N_STATES,
-            n_components=self.config.N_PCA_COMPONENTS,
+            n_states=n_states,
+            n_components=n_pca_components,
             primary_timeframe=primary_timeframe
         )
         
@@ -288,12 +302,27 @@ class TrainingPipeline:
             if missing_val > max_missing or low_ratio_val > max_low_ratio:
                 logger.info(f"🔄 状态分布不健康（缺失: {missing_val}, 低占比: {low_ratio_val}），尝试自动优化状态数量...")
                 
+                # 根据模型配置的 n_states 调整搜索范围
+                # 优先使用模型特定的 min/max，否则使用全局配置
+                model_n_states_min = model_config.get("n_states_min")
+                model_n_states_max = model_config.get("n_states_max")
+                global_n_states_min = getattr(self.config, 'N_STATES_MIN', 4)
+                global_n_states_max = getattr(self.config, 'N_STATES_MAX', 8)
+                
+                # 如果模型配置了特定的 min/max，直接使用；否则基于 n_states 计算
+                if model_n_states_min is not None and model_n_states_max is not None:
+                    search_n_states_min = model_n_states_min
+                    search_n_states_max = model_n_states_max
+                else:
+                    search_n_states_min = max(global_n_states_min, n_states - 2)
+                    search_n_states_max = min(global_n_states_max, n_states + 2)
+                
                 n_states_optimization = hmm_labeler.auto_optimize_n_states(
                     train_features=train_features,
                     val_features=val_features,
                     test_features=test_features,
-                    n_states_min=getattr(self.config, 'N_STATES_MIN', 4),
-                    n_states_max=getattr(self.config, 'N_STATES_MAX', 8),
+                    n_states_min=search_n_states_min,
+                    n_states_max=search_n_states_max,
                     max_missing_allowed=max_missing,
                     max_low_ratio_allowed=max_low_ratio,
                     strategy=getattr(self.config, 'N_STATES_ADJUST_STRATEGY', 'decrease_first'),
